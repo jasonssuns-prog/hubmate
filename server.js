@@ -153,6 +153,42 @@ function clientIp(req) {
   return req.socket.remoteAddress || '?';
 }
 
+/* ---------- v60：TOTP 二次验证（RFC 6238，6 位，30 秒一跳；前后各容一个时间窗，防手机时钟差） ---------- */
+const TOTP_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+function base32Encode(buf) {
+  let out = '', bits = 0, val = 0;
+  for (const b of buf) {
+    val = (val << 8) | b; bits += 8;
+    while (bits >= 5) { out += TOTP_ALPHABET[(val >>> (bits - 5)) & 31]; bits -= 5; }
+  }
+  if (bits > 0) out += TOTP_ALPHABET[(val << (5 - bits)) & 31];
+  return out;
+}
+function base32Decode(str) {
+  const clean = String(str).toUpperCase().replace(/[^A-Z2-7]/g, '');
+  const bytes = [];
+  let bits = 0, val = 0;
+  for (const ch of clean) {
+    val = (val << 5) | TOTP_ALPHABET.indexOf(ch); bits += 5;
+    if (bits >= 8) { bytes.push((val >>> (bits - 8)) & 255); bits -= 8; }
+  }
+  return Buffer.from(bytes);
+}
+function totpCode(secret, step) {
+  const key = base32Decode(secret);
+  const buf = Buffer.alloc(8);
+  buf.writeBigUInt64BE(BigInt(step));
+  const h = crypto.createHmac('sha1', key).update(buf).digest();
+  const off = h[h.length - 1] & 0x0f;
+  const code = ((h[off] & 0x7f) << 24) | ((h[off + 1] & 0xff) << 16) | ((h[off + 2] & 0xff) << 8) | (h[off + 3] & 0xff);
+  return String(code % 1e6).padStart(6, '0');
+}
+function verifyTotp(secret, code) {
+  if (!secret || !/^\d{6}$/.test(String(code || ''))) return false;
+  const step = Math.floor(Date.now() / 30000);
+  for (const s of [step - 1, step, step + 1]) if (totpCode(secret, s) === String(code)) return true;
+  return false;
+}
 /* ---------- 登录防爆破：每 IP 10 分钟最多 10 次尝试 ---------- */
 const loginHits = new Map();
 setInterval(() => {
@@ -309,6 +345,7 @@ function metaPayload(data) {
     xp: data.xp,
     level: levelOf(data.xp),
     passwordIsDefault: data.passwordIsDefault !== false,
+    totpEnabled: !!data.totpEnabled,
     categories: categoriesOf(data).map(normCat),
     stats: {
       services: data.services.length,
@@ -339,7 +376,17 @@ function publicServices(data) {
     hasAccount: (Array.isArray(s.accounts) && s.accounts.length > 0) || !!s.account,
     visits: s.visits || 0,
     sortOrder: s.sortOrder ?? 0,
-    notes: s.notes || ''
+    notes: s.notes || '',
+    linkStatus: s.linkStatus,
+    tags: (Array.isArray(s.tags) ? s.tags : []).map((t) => String(t).trim().slice(0, 20)).filter(Boolean).slice(0, 10),
+    uptime7: (() => {
+      const hist = (Array.isArray(s.linkHistory) ? s.linkHistory : []).filter((h) => h && typeof h.t === 'number' && typeof h.ok === 'boolean');
+      if (!hist.length) return null;
+      const cutoff = Date.now() - 7 * 86400e3;
+      const recent = hist.filter((h) => h.t >= cutoff);
+      if (!recent.length) return null;
+      return Math.round((recent.filter((h) => h.ok).length / recent.length) * 100);
+    })()
   }));
 }
 
@@ -432,6 +479,35 @@ function isTokenAllowedEndpoint(pathname, method) {
   if (pathname === '/api/checkins/all') return true;
   return /^\/api\/services\/[0-9a-f]+\/checkin$/.test(pathname);
 }
+/* v60：自动签到配置——只适合没有人机验证的纯接口签到（带验证码的站签不了）；
+   成功 = HTTP 2xx，且响应里包含 expect 指定的文字（没填就不查） */
+function sanitizeAutoSignin(a) {
+  if (!a || typeof a !== 'object') return null;
+  const url = String(a.url || '').trim().slice(0, 500);
+  if (!url || !/^https?:\/\//i.test(url)) return null;
+  const headers = {};
+  if (a.headers && typeof a.headers === 'object') {
+    for (const [k, v] of Object.entries(a.headers).slice(0, 10)) {
+      const key = String(k).trim().slice(0, 100);
+      if (!key) continue;
+      headers[key] = String(v).slice(0, 500);
+    }
+  }
+  return {
+    enabled: !!a.enabled,
+    url,
+    method: String(a.method || 'POST').toUpperCase() === 'GET' ? 'GET' : 'POST',
+    headers,
+    body: String(a.body || '').slice(0, 2000),
+    expect: String(a.expect || '').trim().slice(0, 200)
+  };
+}
+function autoSigninOf(s) {
+  if (!s || !s.autoSignin || typeof s.autoSignin !== 'object') return null;
+  const cfg = sanitizeAutoSignin(s.autoSignin);
+  if (!cfg || !cfg.enabled) return null;
+  return cfg;
+}
 /* ---------- 多账号：一个服务可存多个账号（名字/账号/密码/备注），其中一个是默认 ---------- */
 function sanitizeAccount(a) {
   if (!a || typeof a !== 'object') return null;
@@ -473,6 +549,21 @@ function pickFields(b, existing, catIds) {
   if (b.renewDays !== undefined) out.renewDays = clampInt(b.renewDays, 1, 3650, 365);
   if (b.favorite !== undefined) out.favorite = !!b.favorite;
   if (b.abnormal !== undefined) out.abnormal = !!b.abnormal;
+  /* v60：多标签——逗号分隔也行，数组也行；最多 10 个，每个最多 20 字，去重去空 */
+  if (b.tags !== undefined) {
+    const raw = Array.isArray(b.tags) ? b.tags : String(b.tags || '').split(/[,，、\s]+/);
+    const seen = new Set();
+    out.tags = raw.map((t) => String(t).trim().slice(0, 20)).filter((t) => t && !seen.has(t) && seen.add(t)).slice(0, 10);
+  }
+  /* v60：自动签到配置——编辑页里配，没配或 URL 不合法就不存；传 null 表示清掉（网址清空了） */
+  if (b.autoSignin !== undefined) {
+    if (b.autoSignin === null) { out.autoSignin = null; }
+    else {
+      const cfg = sanitizeAutoSignin(b.autoSignin);
+      if (cfg) out.autoSignin = cfg;
+      else if (b.autoSignin && typeof b.autoSignin === 'object' && !b.autoSignin.url) out.autoSignin = null;
+    }
+  }
   /* 星标和分类互不干涉，只在一种情况下顺带点星：这次请求把分类“新选进”收藏
      （新建就是收藏分类，或原来不是收藏分类、这次改成了收藏分类），这样分类选收藏的
      服务会归拢进收藏栏。只改星标的请求、以及本来就是收藏分类的编辑，都尊重请求里的
@@ -944,7 +1035,198 @@ async function checkLinks() {
 setInterval(() => { checkLinks(); }, 6 * 3600e3).unref();
 setTimeout(() => { checkLinks(); }, 30e3).unref(); // 启动 30 秒后先探一轮，卡片不用等 6 小时
 
-/* ---------- 导出 Markdown 台账 ---------- */
+/* ---------- v60：自动签到——只对配了接口的服务发一次请求（带人机验证的站发了也签不上，
+   所以只认 2xx + 响应里有 expect 文字才算签到成功；失败不记签到，照常 Telegram 提醒你手动签） ---------- */
+async function tryAutoSignin(svc, cfg) {
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(), 15000);
+  try {
+    const res = await fetch(cfg.url, {
+      method: cfg.method,
+      headers: cfg.headers,
+      body: cfg.method === 'POST' && cfg.body ? cfg.body : undefined,
+      signal: ctrl.signal,
+      redirect: 'follow'
+    });
+    const text = await res.text().catch(() => '');
+    const ok = res.status >= 200 && res.status < 300 && (!cfg.expect || text.includes(cfg.expect));
+    return { ok, status: res.status, note: ok ? '' : (res.status >= 200 && res.status < 300 ? `响应里没找到“${cfg.expect}”` : `HTTP ${res.status}`) };
+  } catch (e) {
+    return { ok: false, status: 0, note: e.name === 'AbortError' ? '请求超时（15 秒）' : (e.message || '请求失败') };
+  } finally { clearTimeout(to); }
+}
+async function runAutoSignins() {
+  try {
+    const data = loadData();
+    const t = todayStr();
+    const due = checkinCohort(data, t);
+    const results = [];
+    let changed = false;
+    for (const svc of due) {
+      const cfg = autoSigninOf(svc);
+      if (!cfg) continue;
+      if (serviceDoneToday(svc, t)) continue; // 今天已经签过了，不重复发
+      const r = await tryAutoSignin(svc, cfg);
+      svc.autoSigninLast = { at: cstDateTime(), ok: r.ok, status: r.status, note: r.note || '' };
+      changed = true;
+      if (r.ok) {
+        doCheckin(data, svc, t);
+        results.push({ id: svc.id, name: svc.name, ok: true });
+      } else {
+        results.push({ id: svc.id, name: svc.name, ok: false, note: r.note });
+      }
+    }
+    if (changed) writeJSON(DATA_FILE, data);
+    if (results.length) console.log(`[auto-signin] ${results.filter((r) => r.ok).length}/${results.length} 成功`);
+    return results;
+  } catch (e) { console.error('[!] 自动签到异常:', e.message); return null; }
+}
+setInterval(() => { runAutoSignins(); }, 3600e3).unref();
+setTimeout(() => { runAutoSignins(); }, 60e3).unref(); // 启动 1 分钟后先跑一轮
+
+/* ---------- v60：GitHub 自动备份——每天把去掉敏感字段的数据推到一个私有仓库的单个文件里
+   （hubmate-backup.json），Git 历史就是备份历史；数据没变就不推，免得刷屏 ---------- */
+function strippedBackupData(data) {
+  const out = { ...data };
+  delete out.passwordHash;
+  delete out.apiToken;
+  delete out.totpSecret;
+  delete out.syncToken;
+  out.services = (data.services || []).map((s) => {
+    if (!s.autoSignin) return s;
+    return { ...s, autoSignin: { ...s.autoSignin, headers: {} } };
+  });
+  out.notify = { ...(data.notify || {}) };
+  delete out.notify.token;
+  out.githubBackup = { ...(data.githubBackup || {}) };
+  delete out.githubBackup.token;
+  return out;
+}
+async function pushGithubBackup() {
+  try {
+    const data = loadData();
+    const gb = data.githubBackup || {};
+    if (!gb.token || !gb.repo || !/^[^/\s]+\/[^/\s]+$/.test(gb.repo)) return null;
+    const content = JSON.stringify(strippedBackupData(data), null, 2);
+    const hash = crypto.createHash('sha256').update(content).digest('hex');
+    if (gb.lastHash === hash) return { ok: true, skipped: true };
+    const branch = gb.branch || 'main';
+    const [owner, repo] = gb.repo.split('/');
+    const apiBase = `https://api.github.com/repos/${owner}/${repo}/contents/hubmate-backup.json`;
+    const headers = { 'Authorization': `Bearer ${gb.token}`, 'Accept': 'application/vnd.github+json', 'User-Agent': 'hubmate' };
+    let sha = null;
+    try {
+      const cur = await fetch(`${apiBase}?ref=${encodeURIComponent(branch)}`, { headers });
+      if (cur.ok) { const j = await cur.json(); sha = j.sha || null; }
+    } catch {}
+    const res = await fetch(apiBase, {
+      method: 'PUT',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: `hubmate backup ${todayStr()}`,
+        content: Buffer.from(content).toString('base64'),
+        branch,
+        ...(sha ? { sha } : {})
+      })
+    });
+    const ok = res.ok;
+    const note = ok ? '' : `GitHub 返回 HTTP ${res.status}`;
+    const fresh = loadData();
+    fresh.githubBackup = { ...(fresh.githubBackup || {}), lastAt: cstDateTime(), lastOk: ok, lastNote: note, ...(ok ? { lastHash: hash } : {}) };
+    writeJSON(DATA_FILE, fresh);
+    console.log(`[github-backup] ${ok ? '成功' : '失败 ' + note}`);
+    return { ok, note };
+  } catch (e) { console.error('[!] GitHub 备份异常:', e.message); return { ok: false, note: e.message }; }
+}
+setInterval(() => { pushGithubBackup(); }, 24 * 3600e3).unref();
+setTimeout(() => { pushGithubBackup(); }, 120e3).unref(); // 启动 2 分钟后跑一轮（数据没变就不推）
+
+/* ---------- v61：多服务器同步——对等同步（last-write-wins，单人用够安全） ----------
+   每台服务器配同一个同步口令（syncToken）和对方的地址（syncPeers）；
+   启动时和每 5 分钟跟对方比一次：谁的数据文件更新（mtime 更大）就赢，
+   赢的那份整盘同步过去；内容一样（hash 相同）就不动。掉线的服务器启动后
+   自动从对方拉最新数据。注意：别在同一秒内往两台服务器上写东西（会丢一份），
+   平时只用一台写，另一台就是热备。同步口令能读写整盘数据，千万别外泄。 */
+function dataMtime() {
+  try { return fs.statSync(DATA_FILE).mtimeMs; } catch { return 0; }
+}
+function dataHash(data) {
+  /* 同步用的内容哈希：去掉各服务器自己的同步配置（口令/对方地址/上次同步），
+     只比用户数据本身——不然两台服务器的对方地址永远不同，hash 永远对不上，会来回推 */
+  const { syncToken, syncPeers, syncLast, ...rest } = data || {};
+  return crypto.createHash('sha256').update(JSON.stringify(rest)).digest('hex');
+}
+function syncTokenOk(req, body) {
+  const data = loadData();
+  const tok = data.syncToken || '';
+  if (!tok) return false;
+  let got = '';
+  try { got = new URL(req.url, 'http://x').searchParams.get('token') || ''; } catch {}
+  if (!got && body && typeof body.token === 'string') got = body.token;
+  if (!got) {
+    const h = req.headers.authorization || '';
+    const m = h.match(/^Bearer\s+(\S+)$/i);
+    if (m) got = m[1];
+  }
+  return got === tok;
+}
+async function syncWithPeers() {
+  try {
+    const data = loadData();
+    const peers = (Array.isArray(data.syncPeers) ? data.syncPeers : []).map((u) => String(u).trim()).filter((u) => /^https?:\/\//i.test(u));
+    const tok = data.syncToken || '';
+    if (!tok || !peers.length) return null;
+    const localMtime = dataMtime();
+    const localHash = dataHash(data);
+    let pulled = 0, pushed = 0;
+    for (const peer of peers) {
+      try {
+        const base = peer.replace(/\/+$/, '');
+        const stRes = await fetch(`${base}/api/sync/status?token=${encodeURIComponent(tok)}`, { signal: AbortSignal.timeout(10000) });
+        if (!stRes.ok) continue;
+        const st = await stRes.json();
+        if (!st || typeof st.mtime !== 'number' || !st.hash) continue;
+        if (st.hash === localHash) continue;
+        if (st.mtime > localMtime + 1000) {
+          /* 对方更新：拉过来整盘替换（先自动备份当前数据，保留最近 5 份） */
+          const pullRes = await fetch(`${base}/api/sync/pull?token=${encodeURIComponent(tok)}`, { signal: AbortSignal.timeout(30000) });
+          if (!pullRes.ok) continue;
+          const imp = await pullRes.json();
+          if (!imp || !imp.data || !Array.isArray(imp.data.services)) continue;
+          const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+          try {
+            fs.writeFileSync(path.join(DATA_DIR, `sync-before-import-${stamp}.json`), JSON.stringify(data, null, 2));
+            const olds = fs.readdirSync(DATA_DIR).filter((f) => f.startsWith('sync-before-import-')).sort();
+            while (olds.length > 5) fs.unlinkSync(path.join(DATA_DIR, olds.shift()));
+          } catch {}
+          const keepToken = data.syncToken, keepPeers = data.syncPeers;
+          const next = imp.data;
+          next.syncToken = keepToken; next.syncPeers = keepPeers;
+          writeJSON(DATA_FILE, next);
+          pulled++;
+          console.log(`[sync] 从 ${base} 拉取了新数据`);
+        } else if (localMtime > st.mtime + 1000) {
+          /* 本地更新：推过去 */
+          const pushRes = await fetch(`${base}/api/sync/push`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: tok, data, mtime: localMtime, hash: localHash }),
+            signal: AbortSignal.timeout(30000)
+          });
+          if (pushRes.ok) { const j = await pushRes.json().catch(() => ({})); if (j.applied) pushed++; }
+        }
+      } catch (e) { console.error(`[sync] ${peer} 同步失败:`, e.message); }
+    }
+    if (pulled || pushed) {
+      const fresh = loadData();
+      fresh.syncLast = { at: cstDateTime(), pulled, pushed };
+      writeJSON(DATA_FILE, fresh);
+    }
+    return { pulled, pushed };
+  } catch (e) { console.error('[!] 多服务器同步异常:', e.message); return null; }
+}
+setInterval(() => { syncWithPeers(); }, 5 * 60e3).unref();
+setTimeout(() => { syncWithPeers(); }, 30e3).unref(); // 启动 30 秒后先同步一轮（掉线回来自动追平）
 const mdCell = (v) => String(v ?? '').replace(/\|/g, '/').replace(/\r?\n/g, ' ');
 function ledgerMarkdown(data) {
   const titles = {
@@ -1000,6 +1282,11 @@ async function handleAPI(req, res, pathname) {
     if (body.username !== data.username || !verifyPassword(body.password, data.passwordHash)) {
       return send(401, { error: '用户名或密码不对' });
     }
+    /* v60：开了二次验证的，密码对了还要验 6 位动态码；没填就告诉前端要填（密码已验过才到这一步） */
+    if (data.totpEnabled && data.totpSecret) {
+      if (!body.totp) return send(401, { error: 'need_totp' });
+      if (!verifyTotp(data.totpSecret, body.totp)) return send(401, { error: '二次验证失败' });
+    }
     const token = crypto.randomBytes(32).toString('hex');
     const sessions = loadSessions();
     sessions[token] = { created: Date.now() };
@@ -1047,6 +1334,41 @@ async function handleAPI(req, res, pathname) {
     return;
   }
 
+  /* ---------- v61：多服务器同步的对端接口——用同步口令认证，不走登录会话 ----------
+     口令能读写整盘数据，务必只配在自己的服务器之间，别外泄 */
+  if (pathname === '/api/sync/status' && req.method === 'GET') {
+    if (!syncTokenOk(req, null)) return send(401, { error: '同步口令不对' });
+    const data = loadData();
+    return send(200, { ok: true, mtime: dataMtime(), hash: dataHash(data), services: data.services.length });
+  }
+  if (pathname === '/api/sync/pull' && req.method === 'GET') {
+    if (!syncTokenOk(req, null)) return send(401, { error: '同步口令不对' });
+    const data = loadData();
+    return send(200, { ok: true, mtime: dataMtime(), hash: dataHash(data), data });
+  }
+  if (pathname === '/api/sync/push' && req.method === 'POST') {
+    const body = await jsonBody(req);
+    if (!syncTokenOk(req, body)) return send(401, { error: '同步口令不对' });
+    if (!body.data || !Array.isArray(body.data.services)) return send(400, { error: '同步数据不对' });
+    const data = loadData();
+    const localMtime = dataMtime();
+    const localHash = dataHash(data);
+    if (body.hash && body.hash === localHash) return send(200, { ok: true, applied: false });
+    if (typeof body.mtime === 'number' && body.mtime <= localMtime + 1000) return send(200, { ok: true, applied: false });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    try {
+      fs.writeFileSync(path.join(DATA_DIR, `sync-before-import-${stamp}.json`), JSON.stringify(data, null, 2));
+      const olds = fs.readdirSync(DATA_DIR).filter((f) => f.startsWith('sync-before-import-')).sort();
+      while (olds.length > 5) fs.unlinkSync(path.join(DATA_DIR, olds.shift()));
+    } catch {}
+    const keepToken = data.syncToken, keepPeers = data.syncPeers;
+    const next = body.data;
+    next.syncToken = keepToken; next.syncPeers = keepPeers;
+    next.syncLast = { at: cstDateTime(), pulled: 1, pushed: 0 };
+    writeJSON(DATA_FILE, next);
+    return send(200, { ok: true, applied: true });
+  }
+
   const auth = currentUser(req);
   /* v59：API 令牌只放行签到接口（没登录也能用令牌签到），别的接口仍要登录 */
   const tokenAllowed = !auth && isApiToken(req) && isTokenAllowedEndpoint(pathname, req.method);
@@ -1066,6 +1388,93 @@ async function handleAPI(req, res, pathname) {
   if (pathname === '/api/api-token/revoke' && req.method === 'POST') {
     const data = loadData();
     delete data.apiToken;
+    writeJSON(DATA_FILE, data);
+    return send(200, { ok: true });
+  }
+  /* v60：GitHub 自动备份——配好 Token 和私有仓库后，每天自动把数据推过去；手动也能立即推 */
+  if (pathname === '/api/github-backup/status' && req.method === 'GET') {
+    const data = loadData();
+    const gb = data.githubBackup || {};
+    return send(200, { configured: !!(gb.token && gb.repo), repo: gb.repo || '', branch: gb.branch || 'main', lastAt: gb.lastAt || '', lastOk: !!gb.lastOk, lastNote: gb.lastNote || '' });
+  }
+  if (pathname === '/api/github-backup/save' && req.method === 'POST') {
+    const body = await jsonBody(req);
+    const data = loadData();
+    const gb = data.githubBackup || {};
+    const token = String(body.token || '').trim();
+    const repo = String(body.repo || '').trim();
+    if (repo && !/^[^/\s]+\/[^/\s]+$/.test(repo)) return send(400, { error: '仓库格式不对，填“用户名/仓库名”，比如 jasonssuns-prog/hubmate-data' });
+    if (token) gb.token = token;
+    if (repo) gb.repo = repo;
+    gb.branch = String(body.branch || 'main').trim() || 'main';
+    data.githubBackup = gb;
+    writeJSON(DATA_FILE, data);
+    return send(200, { ok: true, configured: !!(gb.token && gb.repo) });
+  }
+  if (pathname === '/api/github-backup/run' && req.method === 'POST') {
+    const r = await pushGithubBackup();
+    if (!r) return send(400, { error: '还没配好 Token 或仓库' });
+    if (r.skipped) return send(200, { ok: true, skipped: true, note: '数据没变，不用推' });
+    if (!r.ok) return send(400, { error: r.note || '备份失败' });
+    return send(200, { ok: true });
+  }
+  /* v61：多服务器同步的设置——口令只在生成那一刻返回一次；对方地址一行一个；
+     同步口令能读写整盘数据，只配在自己的服务器之间，别外泄 */
+  if (pathname === '/api/sync/config' && req.method === 'GET') {
+    const data = loadData();
+    const last = data.syncLast || {};
+    return send(200, { configured: !!(data.syncToken && (data.syncPeers || []).length), hasToken: !!data.syncToken, peers: data.syncPeers || [], lastAt: last.at || '', lastPulled: last.pulled || 0, lastPushed: last.pushed || 0 });
+  }
+  if (pathname === '/api/sync/token' && req.method === 'POST') {
+    const data = loadData();
+    data.syncToken = crypto.randomBytes(32).toString('hex');
+    writeJSON(DATA_FILE, data);
+    return send(200, { ok: true, token: data.syncToken });
+  }
+  if (pathname === '/api/sync/config' && req.method === 'POST') {
+    const body = await jsonBody(req);
+    const data = loadData();
+    const token = String(body.token || '').trim();
+    if (token) data.syncToken = token;
+    const peers = (Array.isArray(body.peers) ? body.peers : String(body.peers || '').split('\n')).map((u) => String(u).trim()).filter((u) => /^https?:\/\//i.test(u)).slice(0, 5);
+    data.syncPeers = peers;
+    writeJSON(DATA_FILE, data);
+    return send(200, { ok: true, configured: !!(data.syncToken && peers.length) });
+  }
+  if (pathname === '/api/sync/run' && req.method === 'POST') {
+    const r = await syncWithPeers();
+    if (!r) return send(400, { error: '还没配好同步口令或对方地址' });
+    return send(200, { ok: true, pulled: r.pulled, pushed: r.pushed });
+  }
+  if (pathname === '/api/totp/status' && req.method === 'GET') {
+    const data = loadData();
+    return send(200, { enabled: !!data.totpEnabled });
+  }
+  if (pathname === '/api/totp/setup' && req.method === 'POST') {
+    const data = loadData();
+    data.totpSecret = base32Encode(crypto.randomBytes(20));
+    data.totpEnabled = false;
+    writeJSON(DATA_FILE, data);
+    const label = encodeURIComponent(`hubmate:${data.username || 'user'}`);
+    const otpauth = `otpauth://totp/${label}?secret=${data.totpSecret}&issuer=hubmate&algorithm=SHA1&digits=6&period=30`;
+    return send(200, { ok: true, secret: data.totpSecret, otpauth });
+  }
+  if (pathname === '/api/totp/enable' && req.method === 'POST') {
+    const body = await jsonBody(req);
+    const data = loadData();
+    if (!data.totpSecret) return send(400, { error: '先点“生成密钥”' });
+    if (!verifyTotp(data.totpSecret, body.code)) return send(401, { error: '动态码不对，请对一下手机时间' });
+    data.totpEnabled = true;
+    writeJSON(DATA_FILE, data);
+    return send(200, { ok: true });
+  }
+  if (pathname === '/api/totp/disable' && req.method === 'POST') {
+    const body = await jsonBody(req);
+    const data = loadData();
+    if (!verifyPassword(body.password, data.passwordHash)) return send(401, { error: '密码不对' });
+    if (data.totpEnabled && !verifyTotp(data.totpSecret, body.code)) return send(401, { error: '动态码不对' });
+    delete data.totpSecret;
+    data.totpEnabled = false;
     writeJSON(DATA_FILE, data);
     return send(200, { ok: true });
   }
@@ -1185,6 +1594,19 @@ async function handleAPI(req, res, pathname) {
     if (!r) return send(400, { error: '检测失败' });
     return send(200, r);
   }
+  /* v60：自动签到——手动立即跑一轮（只跑今天到期且没签过的）；测试只发请求不记签到 */
+  if (pathname === '/api/auto-signin/run' && req.method === 'POST') {
+    const r = await runAutoSignins();
+    if (!r) return send(400, { error: '自动签到失败' });
+    return send(200, { ok: true, results: r });
+  }
+  if (pathname === '/api/auto-signin/test' && req.method === 'POST') {
+    const body = await jsonBody(req);
+    const cfg = sanitizeAutoSignin(body.autoSignin || body);
+    if (!cfg) return send(400, { error: '自动签到没配好：网址要是 http(s) 开头' });
+    const r = await tryAutoSignin(null, cfg);
+    return send(200, { ok: r.ok, status: r.status, note: r.note || '' });
+  }
   /* 分类管理：系统分类不能删，删自定义分类会把旗下服务移到中转站 */
   if (pathname === '/api/categories' && req.method === 'POST') {
     const body = await jsonBody(req);
@@ -1252,11 +1674,7 @@ async function handleAPI(req, res, pathname) {
      恢复时这两项永远沿用当前值，旧版原始备份也能照常恢复 */
   if (pathname === '/api/backup' && req.method === 'GET') {
     const data = loadData();
-    const out = { ...data };
-    delete out.passwordHash;
-    delete out.apiToken;
-    out.notify = { ...(data.notify || {}) };
-    delete out.notify.token;
+    const out = strippedBackupData(data);
     const fname = `service-hub-backup-${todayStr()}.json`;
     res.writeHead(200, Object.assign({
       'Content-Type': 'application/json; charset=utf-8',
@@ -1307,7 +1725,10 @@ async function handleAPI(req, res, pathname) {
       sortOrder: Number(s.sortOrder) || 0,
       linkStatus: s.linkStatus,
       linkHistory: (Array.isArray(s.linkHistory) ? s.linkHistory : []).filter((h) => h && typeof h.t === 'number' && typeof h.ok === 'boolean').slice(-120),
-      renewHistory: (Array.isArray(s.renewHistory) ? s.renewHistory : []).filter((h) => h && /^\d{4}-\d{2}-\d{2}$/.test(h.at || '') && typeof h.from === 'string' && typeof h.to === 'string').slice(-20)
+      renewHistory: (Array.isArray(s.renewHistory) ? s.renewHistory : []).filter((h) => h && /^\d{4}-\d{2}-\d{2}$/.test(h.at || '') && typeof h.from === 'string' && typeof h.to === 'string').slice(-20),
+      tags: (Array.isArray(s.tags) ? s.tags : []).map((t) => String(t).trim().slice(0, 20)).filter(Boolean).slice(0, 10),
+      autoSignin: sanitizeAutoSignin(s.autoSignin),
+      autoSigninLast: (s.autoSigninLast && typeof s.autoSigninLast === 'object') ? { at: String(s.autoSigninLast.at || '').slice(0, 30), ok: !!s.autoSigninLast.ok, status: Number(s.autoSigninLast.status) || 0, note: String(s.autoSigninLast.note || '').slice(0, 200) } : undefined
     }));
     data.categories = cats.map((c) => ({ id: c.id, label: String(c.label).slice(0, 20), icon: cleanIcon(c.icon), cls: c.cls || 't-custom' }));
     if (imp.history && typeof imp.history === 'object') data.history = imp.history;

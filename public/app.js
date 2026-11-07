@@ -35,7 +35,7 @@ const QUOTES = [
   '每天一分钟，资产不失控。'
 ];
 
-let mode = 'preview', me = null, services = [], meta = null, filter = 'all', q = '', editingId = null;
+let mode = 'preview', me = null, services = [], meta = null, filter = 'all', q = '', editingId = null, tagFilter = null;
 /* 星标和分类是两回事，互不干涉：收藏栏只看星标，分类只决定它分在哪个组里。
    选“收藏”分类保存时，服务器会在“新进收藏分类”那一刻顺带点上星，所以它会进收藏栏；
    之后取消星标，只会让它离开收藏栏，分类保持不动。 */
@@ -147,6 +147,28 @@ function uptimeRate(s, days) {
   if (!recent.length) return null;
   return Math.round((recent.filter((h) => h.ok).length / recent.length) * 100);
 }
+/* v60：服务健康分（0–100）——在线率 40 + 到期远近 30 + 签到 20 + 死链 10；
+   哪项没数据就不算（权重重新归一），一项都没有就不显示 */
+function healthScore(s) {
+  const t = todayStr();
+  const parts = [];
+  const up = uptimeRate(s, 7);
+  if (up !== null) parts.push([up, 40]);
+  if (s?.expiresAt) {
+    const d = daysUntil(s.expiresAt);
+    if (d !== null) parts.push([d < 0 ? 0 : (d >= 30 ? 100 : Math.round((d / 30) * 100)), 30]);
+  }
+  if (s?.checkinFrequency === 'daily' && s?.category !== 'idle') {
+    parts.push([(dueToday(s, t) && !serviceDoneToday(s, t)) ? 0 : 100, 20]);
+  }
+  if (s?.linkStatus) parts.push([s.linkStatus === 'dead' ? 0 : 100, 10]);
+  if (!parts.length) return null;
+  const total = parts.reduce((n, [, w]) => n + w, 0);
+  return Math.round(parts.reduce((n, [v, w]) => n + v * w, 0) / total);
+}
+function healthClass(score) {
+  return score === null ? '' : (score >= 80 ? 'b-ok' : (score >= 50 ? 'b-warn' : 'b-bad'));
+}
 /* 下次签到（只给间隔 > 1 天的服务显示）：没签过就是今天；否则上次签到 + 间隔天数；算出来已过期的也算今天 */
 function nextCheckinLabel(s, t) {
   if (s.checkinFrequency !== 'daily' || s.category === 'idle' || everyDays(s) <= 1) return '';
@@ -256,6 +278,8 @@ async function loadCaptcha() {
 function openLogin() {
   $('#l-err').classList.add('hidden');
   $('#login-overlay').classList.remove('hidden');
+  /* v60：开了二次验证的，登录框里直接露出动态码输入框 */
+  $('#l-totp-row').style.display = meta?.totpEnabled ? '' : 'none';
   loadCaptcha();
   $('#l-user').focus();
 }
@@ -376,7 +400,7 @@ function renderAll() {
 
   renderBanner();
   if (!live()) renderLanding();
-  else { renderFav(); renderExpiring(); renderPwReuse(); renderYearReview(); refreshApiTokenStatus(); }
+  else { renderFav(); renderExpiring(); renderPwReuse(); renderYearReview(); refreshApiTokenStatus(); refreshTotpStatus(); refreshGithubStatus(); refreshSyncStatus(); }
   const sb = $('#sec-banner');
   if (live() && meta.passwordIsDefault) {
     sb.innerHTML = '🔒 当前还是初始默认密码，部署到服务器前务必点右上角「改密码」换掉！';
@@ -385,9 +409,32 @@ function renderAll() {
   renderCheckin();
   renderHeatmap();
   renderAch();
+  renderHealth();
   renderChips();
   renderGrid();
   drawTrend();
+}
+/* v60：健康分最低的 5 个服务（分数越低越需要处理），点名字跳到卡片 */
+function renderHealth() {
+  const box = $('#health-list');
+  if (!box) return;
+  const scored = services
+    .map((s) => ({ s, score: healthScore(s) }))
+    .filter((x) => x.score !== null)
+    .sort((a, b) => a.score - b.score)
+    .slice(0, 5);
+  if (!scored.length) { box.innerHTML = '<div class="empty">还没有能算健康分的数据（等死链检测跑一轮就有在线率了）。</div>'; return; }
+  box.innerHTML = scored.map(({ s, score }) => {
+    const reasons = [];
+    const up = uptimeRate(s, 7);
+    if (up !== null && up < 90) reasons.push(`在线率 ${up}%`);
+    const d = daysUntil(s.expiresAt);
+    if (d !== null && d < 0) reasons.push(`已过期 ${-d} 天`);
+    else if (d !== null && d <= 7) reasons.push(d === 0 ? '今天到期' : `${d} 天后到期`);
+    if (s.checkinFrequency === 'daily' && s.category !== 'idle' && dueToday(s, todayStr()) && !serviceDoneToday(s, todayStr())) reasons.push('今天还没签');
+    if (s.linkStatus === 'dead') reasons.push('疑似失效');
+    return `<div class="landing-checkin-item"><span class="ck">💚</span><span class="ck-name">${esc(s.name)}</span><span class="ck-note">${reasons.length ? esc(reasons.join(' · ')) : '状态还行'}</span><span class="badge ${healthClass(score)}">${score} 分</span><button class="btn small ghost" data-act="edit" data-id="${s.id}">编辑</button></div>`;
+  }).join('');
 }
 
 function renderBanner() {
@@ -485,6 +532,14 @@ function renderChips() {
   /* “收藏”分类不单独再出一个筛选 chip：上面的“我的收藏”已经按统一口径（星标或收藏分类）汇总，避免两个同功能按钮 */
   for (const [k, v] of Object.entries(CATS)) if (k !== 'fav') html += mk(k, `${v.icon} ${v.label}`, counts[k] || 0);
   $('#chips').innerHTML = html;
+  /* v60：标签栏——所有用过的标签，点一下只看带这个标签的服务，再点取消 */
+  const tagCounts = {};
+  services.forEach((s) => { (s.tags || []).forEach((t) => { tagCounts[t] = (tagCounts[t] || 0) + 1; }); });
+  const tagRow = $('#tag-row');
+  if (tagRow) {
+    tagRow.innerHTML = Object.entries(tagCounts).sort((a, b) => b[1] - a[1]).map(([t, n]) =>
+      `<button class="chip${tagFilter === t ? ' on' : ''}" data-tag="${esc(t)}">#${esc(t)} <i>${n}</i></button>`).join('');
+  }
 }
 
 function cardBold(s) {
@@ -515,6 +570,9 @@ function cardHTML(s, idx) {
   }
   const bold = cardBold(s);
   const noteLines = (s.notes || '').split(/\r?\n/).slice(1).filter(Boolean);
+  const health = healthScore(s);
+  const healthBadge = health !== null ? `<span class="badge ${healthClass(health)}" title="健康分：在线率 + 到期远近 + 签到 + 死链">💚 ${health}</span>` : '';
+  const tagChips = (s.tags || []).map((t) => `<button class="tag-chip" data-tag="${esc(t)}" title="只看带“${esc(t)}”标签的服务">${esc(t)}</button>`).join('');
   const nextCk = nextCheckinLabel(s, todayStr());
   const lastRenew = (s.renewHistory || []).length ? s.renewHistory[s.renewHistory.length - 1].at : '';
   const up7 = uptimeRate(s, 7);
@@ -553,10 +611,11 @@ function cardHTML(s, idx) {
     <span class="ghost-num">${num}</span>
     <div class="c-head">
       <span class="cat-pill ${cat.cls}"><i></i>${cat.icon} ${cat.label}</span>
-      <span class="c-badges">${isFav(s) ? '<span class="badge b-fav">★ 收藏</span>' : ''}${s.abnormal ? '<span class="badge b-bad">⚠️ 异常</span>' : ''}${s.visits ? `<span class="badge b-visit" title="累计访问 ${s.visits} 次">👆 ${s.visits}</span>` : ''}${exp}${s.linkStatus === 'dead' ? '<span class="badge b-bad" title="最近一次检测打不开">⚠️ 疑似失效</span>' : ''}${st ? `<span class="badge b-fire">🔥 连${st}天</span>` : ''}${checkedToday ? '<span class="badge b-ok">今日已签</span>' : ''}${partialBadge}</span>
+      <span class="c-badges">${isFav(s) ? '<span class="badge b-fav">★ 收藏</span>' : ''}${s.abnormal ? '<span class="badge b-bad">⚠️ 异常</span>' : ''}${s.visits ? `<span class="badge b-visit" title="累计访问 ${s.visits} 次">👆 ${s.visits}</span>` : ''}${exp}${healthBadge}${s.linkStatus === 'dead' ? '<span class="badge b-bad" title="最近一次检测打不开">⚠️ 疑似失效</span>' : ''}${st ? `<span class="badge b-fire">🔥 连${st}天</span>` : ''}${checkedToday ? '<span class="badge b-ok">今日已签</span>' : ''}${partialBadge}</span>
     </div>
     <div class="c-title">${favIcon(s)}${s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener" data-visit="${s.id}">${esc(s.name)} <span class="arrow">↗</span></a>` : esc(s.name)}</div>
     <div class="c-desc">${esc(bold)}</div>
+    ${tagChips ? `<div class="c-tags">${tagChips}</div>` : ''}
     <div class="c-div"></div>
     <div class="c-note">${metaLine}</div>
     ${noteLines.map((l) => `<div class="c-note">${esc(l)}</div>`).join('')}
@@ -569,8 +628,10 @@ function renderGrid() {
   const list = services.filter((s) => {
     if (filter === 'fav' && !isFav(s)) return false;
     if (filter !== 'all' && filter !== 'fav' && s.category !== filter) return false;
+    /* v60：标签筛选——点卡片上的标签或标签栏，只看带这个标签的服务 */
+    if (tagFilter && !(s.tags || []).includes(tagFilter)) return false;
     if (kw) {
-      const hay = `${s.name} ${s.account || ''} ${s.url} ${s.notes} ${s.secret || ''}`.toLowerCase();
+      const hay = `${s.name} ${s.account || ''} ${s.url} ${s.notes} ${s.secret || ''} ${(s.tags || []).join(' ')}`.toLowerCase();
       if (!hay.includes(kw)) return false;
     }
     return true;
@@ -686,6 +747,22 @@ function renderLanding() {
           return `<a class="landing-site" href="${esc(s.url || '#')}" target="_blank" rel="noopener">${favIcon(s)}<b>${isFav(s) ? '★ ' : ''}${esc(s.name)}</b><i>${esc(host)}</i><span>${CATS[s.category]?.label || s.category}</span><span class="go">直达 ↗</span></a>`;
         }).join('')}</div>`
       : (kw ? '<div class="empty">没有匹配的网站，换个关键词试试。</div>' : '<div class="empty">还没有收录网站，登录后添加。</div>');
+  }
+  /* v60：公开状态页——每个服务的在线/离线 + 7 天在线率（只用公开接口里的数据） */
+  const stList = $('#landing-status-list');
+  if (stList) {
+    const withStatus = services.filter((s) => s.url);
+    const upCount = withStatus.filter((s) => s.linkStatus === 'ok').length;
+    const scEl = $('#landing-status-count');
+    if (scEl) scEl.textContent = withStatus.length ? `${upCount}/${withStatus.length} 在线` : '';
+    stList.innerHTML = withStatus.length
+      ? withStatus.map((s) => {
+          const dot = s.linkStatus === 'ok' ? '🟢' : (s.linkStatus === 'dead' ? '🔴' : '⚪');
+          const label = s.linkStatus === 'ok' ? '在线' : (s.linkStatus === 'dead' ? '疑似离线' : '未检测');
+          const up = (s.uptime7 !== null && s.uptime7 !== undefined) ? ` · 7天在线率 ${s.uptime7}%` : '';
+          return `<div class="landing-checkin-item"><span class="ck">${dot}</span><span class="ck-name">${s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.name)}</a>` : esc(s.name)}</span><span class="ck-note">${label}${up}</span></div>`;
+        }).join('')
+      : '<div class="empty">还没有可检测的服务。</div>';
   }
   /* 渲染完再量一次：框内装不下时才显示滚动提示 */
   requestAnimationFrame(checkLandingScroll);
@@ -1018,6 +1095,7 @@ function openModal(svc) {
   renderCatOptions();
   $('#f-category').value = (svc?.category && CATS[svc.category]) ? svc.category : 'relay';
   $('#f-url').value = svc?.url || '';
+  $('#f-tags').value = (svc?.tags || []).join('，');
   $('#f-registered').value = svc?.registeredAt || todayStr();
   $('#f-expires').value = svc?.expiresAt || '';
   expiryDirty = false; // 新开弹窗：到期日还没手动改过，可以自动填
@@ -1029,6 +1107,17 @@ function openModal(svc) {
   $('#f-notes').value = svc?.notes || '';
   $('#f-fav').checked = isFav(svc);
   $('#f-abnormal').checked = !!svc?.abnormal;
+  /* v60：自动签到配置——请求头一行一个“名字: 值”，打开时拼回文本框 */
+  const as = svc?.autoSignin || {};
+  $('#f-autosignin-enabled').checked = !!as.enabled;
+  $('#f-autosignin-url').value = as.url || '';
+  $('#f-autosignin-method').value = as.method === 'GET' ? 'GET' : 'POST';
+  $('#f-autosignin-headers').value = Object.entries(as.headers || {}).map(([k, v]) => `${k}: ${v}`).join('\n');
+  $('#f-autosignin-body').value = as.body || '';
+  $('#f-autosignin-expect').value = as.expect || '';
+  $('#autosignin-test-msg').textContent = '';
+  const last = svc?.autoSigninLast;
+  $('#autosignin-last').textContent = last ? `上次自动签到：${last.at || ''} ${last.ok ? '✅ 成功' : `❌ 失败（${last.note || 'HTTP ' + (last.status || '')}）`}` : '';
   $('#overlay').classList.remove('hidden');
   $('#f-name').focus();
 }
@@ -1041,6 +1130,33 @@ function closeModal() {
 $('#f-registered').addEventListener('change', autoFillExpires);
 $('#f-renew-days').addEventListener('change', autoFillExpires);
 $('#f-expires').addEventListener('input', () => { expiryDirty = true; });
+
+/* v60：自动签到——测试这个请求（只发请求不记签到，返回状态和结果） */
+$('#btn-autosignin-test').addEventListener('click', async () => {
+  const msg = $('#autosignin-test-msg');
+  const url = $('#f-autosignin-url').value.trim();
+  if (!url) { msg.textContent = '先填签到接口网址'; return; }
+  const headers = {};
+  for (const line of $('#f-autosignin-headers').value.split('\n')) {
+    const i = line.indexOf(':');
+    if (i <= 0) continue;
+    const k = line.slice(0, i).trim();
+    const v = line.slice(i + 1).trim();
+    if (k) headers[k] = v;
+  }
+  const btn = $('#btn-autosignin-test');
+  if (btn.disabled) return;
+  btn.disabled = true;
+  msg.textContent = '请求中…';
+  try {
+    const r = await api('/api/auto-signin/test', { method: 'POST', body: JSON.stringify({ autoSignin: {
+      enabled: true, url, method: $('#f-autosignin-method').value, headers,
+      body: $('#f-autosignin-body').value, expect: $('#f-autosignin-expect').value.trim()
+    } }) });
+    msg.textContent = r.ok ? `✅ 请求成功（HTTP ${r.status}）` : `❌ 没签上：${r.note || 'HTTP ' + r.status}`;
+  } catch (err) { msg.textContent = '测试失败：' + (err.message || ''); }
+  finally { btn.disabled = false; }
+});
 
 /* ---------- 事件 ---------- */
 document.body.addEventListener('click', async (e) => {
@@ -1060,6 +1176,16 @@ document.body.addEventListener('click', async (e) => {
 
   const chip = e.target.closest('[data-cat]');
   if (chip) { filter = chip.dataset.cat; renderChips(); renderGrid(); return; }
+
+  /* v60：标签筛选——点标签栏或卡片上的标签，只看带这个标签的服务；再点同一个取消 */
+  const tagEl = e.target.closest('[data-tag]');
+  if (tagEl) {
+    const t = tagEl.dataset.tag;
+    tagFilter = (tagFilter === t) ? null : t;
+    renderChips();
+    renderGrid();
+    return;
+  }
 
   const cp = e.target.closest('[data-copy]');
   if (cp) { await copyText(cp.dataset.copy); toast('已复制'); return; }
@@ -1263,15 +1389,24 @@ $('#login-form').addEventListener('submit', async (e) => {
   try {
     me = await api('/api/login', {
       method: 'POST',
-      body: JSON.stringify({ username: $('#l-user').value.trim(), password: $('#l-pass').value, captchaId, captcha: $('#l-captcha').value })
+      body: JSON.stringify({ username: $('#l-user').value.trim(), password: $('#l-pass').value, captchaId, captcha: $('#l-captcha').value, totp: $('#l-totp').value.trim() || undefined })
     });
     $('#l-pass').value = '';
     $('#l-captcha').value = '';
+    $('#l-totp').value = '';
     $('#login-overlay').classList.add('hidden');
     await loadAll();
     confetti(60);
     toast(`欢迎回来，${me.username}！`, 'gold');
   } catch (err) {
+    /* v60：密码对了但没填动态码——把二次验证框露出来，让用户填了再登 */
+    if (err.message === 'need_totp') {
+      $('#l-totp-row').style.display = '';
+      $('#l-err').textContent = '开了二次验证，请输入 Authenticator 里的 6 位动态码';
+      $('#l-err').classList.remove('hidden');
+      $('#l-totp').focus();
+      return;
+    }
     $('#l-err').textContent = err.message;
     $('#l-err').classList.remove('hidden');
     /* 验证码一次性作废：任何一次登录失败都换一张，旧图再填也无效 */
@@ -1309,6 +1444,7 @@ $('#modal-save').addEventListener('click', async () => {
     name: $('#f-name').value.trim(),
     category: $('#f-category').value,
     url: $('#f-url').value.trim(),
+    tags: $('#f-tags').value.split(/[,，、\s]+/).map((t) => t.trim()).filter(Boolean).slice(0, 10),
     registeredAt: $('#f-registered').value,
     expiresAt: $('#f-expires').value,
     price: $('#f-price').value.trim(),
@@ -1317,7 +1453,28 @@ $('#modal-save').addEventListener('click', async () => {
     renewDays: Math.min(3650, Math.max(1, parseInt($('#f-renew-days').value, 10) || 365)),
     notes: $('#f-notes').value.trim(),
     favorite: $('#f-fav').checked,
-    abnormal: $('#f-abnormal').checked
+    abnormal: $('#f-abnormal').checked,
+    /* v60：自动签到配置——请求头一行一个“名字: 值”，解析成对象；没填网址就不发这个字段 */
+    autoSignin: (() => {
+      const url = $('#f-autosignin-url').value.trim();
+      if (!url) return null;
+      const headers = {};
+      for (const line of $('#f-autosignin-headers').value.split('\n')) {
+        const i = line.indexOf(':');
+        if (i <= 0) continue;
+        const k = line.slice(0, i).trim();
+        const v = line.slice(i + 1).trim();
+        if (k) headers[k] = v;
+      }
+      return {
+        enabled: $('#f-autosignin-enabled').checked,
+        url,
+        method: $('#f-autosignin-method').value,
+        headers,
+        body: $('#f-autosignin-body').value,
+        expect: $('#f-autosignin-expect').value.trim()
+      };
+    })()
   };
   /* 星标和分类互不干涉：收藏分类 + 没勾星是合法组合（分在收藏组，但不在收藏栏），
      保存时不再强制把分类改回中转站 */
@@ -1516,6 +1673,30 @@ $('#btn-csv-export').addEventListener('click', () => {
   toast(`已导出 ${services.length} 个服务为 CSV`);
 });
 $('#btn-csv-import').addEventListener('click', () => $('#csv-file').click());
+/* v60：账号导出 CSV——服务名/账号名/账号/密码/备注，可直接导进 1Password、Bitwarden；
+   文件里含密码，下载后妥善保管，别发给别人 */
+$('#btn-acc-export').addEventListener('click', () => {
+  const rows = [['服务', '账号名称', '账号', '密码', '网址', '备注']];
+  let n = 0;
+  for (const s of services) {
+    for (const a of accountList(s)) {
+      rows.push([s.name, a.label || '', a.username || '', a.password || '', s.url || '', a.notes || '']);
+      n++;
+    }
+  }
+  if (!n) { toast('还没录过账号', 'bad'); return; }
+  const escCsv = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const csv = '\uFEFF' + rows.map((r) => r.map(escCsv).join(',')).join('\r\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `hubmate-accounts-${todayStr()}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  toast(`已导出 ${n} 个账号为 CSV（文件含密码，妥善保管）`);
+});
 $('#csv-file').addEventListener('change', async (e) => {
   const f = e.target.files[0];
   e.target.value = '';
@@ -1916,6 +2097,160 @@ $('#btn-apitoken-revoke')?.addEventListener('click', async () => {
   finally { b.disabled = false; }
 });
 setApiTokenExample('你的令牌');
+
+/* v60：二次验证——密钥只在生成那一刻显示一次，平时只告诉你开没开；
+   启用要验一次动态码，关闭要密码 + 动态码双重确认 */
+let totpSecretShown = '';
+async function refreshTotpStatus() {
+  if (!live()) return;
+  try {
+    const r = await api('/api/totp/status');
+    $('#totp-status').textContent = r.enabled ? '已启用' : '未启用';
+  } catch { /* 未登录时不显示 */ }
+}
+$('#btn-totp-setup')?.addEventListener('click', async () => {
+  const b = $('#btn-totp-setup');
+  if (b.disabled) return;
+  b.disabled = true;
+  try {
+    const r = await api('/api/totp/setup', { method: 'POST' });
+    totpSecretShown = r.secret || '';
+    $('#totp-secret').textContent = totpSecretShown;
+    $('#btn-copy-totp').disabled = !totpSecretShown;
+    $('#totp-msg').textContent = '密钥已生成（只显示这一次）：在 Authenticator 里手动添加账号，密钥填上面那串；然后输一次动态码点“启用二次验证”。otpauth 链接：' + (r.otpauth || '');
+    toast('密钥已生成，记得在手机里绑好');
+  } catch (err) { handleAuthErr(err); }
+  finally { b.disabled = false; }
+});
+$('#btn-copy-totp')?.addEventListener('click', async () => {
+  if (!totpSecretShown) return;
+  await copyText(totpSecretShown);
+  toast('密钥已复制');
+});
+$('#btn-totp-enable')?.addEventListener('click', async () => {
+  const code = $('#totp-code').value.trim();
+  if (!/^\d{6}$/.test(code)) { toast('先输 6 位动态码', 'bad'); return; }
+  const b = $('#btn-totp-enable');
+  if (b.disabled) return;
+  b.disabled = true;
+  try {
+    await api('/api/totp/enable', { method: 'POST', body: JSON.stringify({ code }) });
+    $('#totp-status').textContent = '已启用';
+    $('#totp-msg').textContent = '二次验证已启用。下次登录除了密码，还要输 Authenticator 里的动态码。';
+    toast('二次验证已启用');
+  } catch (err) { handleAuthErr(err); }
+  finally { b.disabled = false; }
+});
+$('#btn-totp-disable')?.addEventListener('click', async () => {
+  const code = $('#totp-code').value.trim();
+  if (!/^\d{6}$/.test(code)) { toast('关掉二次验证也要输一次动态码', 'bad'); return; }
+  const pw = prompt('请输入登录密码确认关闭二次验证：');
+  if (!pw) return;
+  const b = $('#btn-totp-disable');
+  if (b.disabled) return;
+  b.disabled = true;
+  try {
+    await api('/api/totp/disable', { method: 'POST', body: JSON.stringify({ password: pw, code }) });
+    totpSecretShown = '';
+    $('#totp-secret').textContent = '还没生成密钥';
+    $('#btn-copy-totp').disabled = true;
+    $('#totp-status').textContent = '未启用';
+    $('#totp-msg').textContent = '二次验证已关闭。';
+    toast('二次验证已关闭');
+  } catch (err) { handleAuthErr(err); }
+  finally { b.disabled = false; }
+});
+
+/* v60：GitHub 自动备份——Token 只存服务端，状态里不返回它 */
+async function refreshGithubStatus() {
+  if (!live()) return;
+  try {
+    const r = await api('/api/github-backup/status');
+    $('#gh-repo').value = r.repo || '';
+    $('#gh-branch').value = r.branch || 'main';
+    $('#github-status').textContent = r.configured ? '已配置' : '未配置';
+    $('#gh-msg').textContent = r.lastAt ? `上次备份：${r.lastAt} ${r.lastOk ? '✅ 成功' : `❌ 失败（${r.lastNote || ''}）`}` : '还没备份过。';
+  } catch { /* 未登录时不显示 */ }
+}
+$('#btn-gh-save')?.addEventListener('click', async () => {
+  const b = $('#btn-gh-save');
+  if (b.disabled) return;
+  b.disabled = true;
+  try {
+    const r = await api('/api/github-backup/save', { method: 'POST', body: JSON.stringify({ token: $('#gh-token').value.trim(), repo: $('#gh-repo').value.trim(), branch: $('#gh-branch').value.trim() }) });
+    $('#gh-token').value = '';
+    $('#github-status').textContent = r.configured ? '已配置' : '未配置';
+    toast(r.configured ? '已保存，每天自动备份' : '已保存，还差 Token 或仓库');
+    refreshGithubStatus();
+  } catch (err) { handleAuthErr(err); }
+  finally { b.disabled = false; }
+});
+$('#btn-gh-run')?.addEventListener('click', async () => {
+  const b = $('#btn-gh-run');
+  if (b.disabled) return;
+  b.disabled = true;
+  try {
+    const r = await api('/api/github-backup/run', { method: 'POST' });
+    toast(r.skipped ? '数据没变，不用推' : '已备份到 GitHub');
+    refreshGithubStatus();
+  } catch (err) { handleAuthErr(err); }
+  finally { b.disabled = false; }
+});
+
+/* v61：多服务器同步——口令只在生成那一刻显示一次，平时只告诉你配没配 */
+let syncTokenShown = '';
+async function refreshSyncStatus() {
+  if (!live()) return;
+  try {
+    const r = await api('/api/sync/config');
+    $('#sync-peers').value = (r.peers || []).join('\n');
+    $('#sync-status').textContent = r.configured ? '已配置' : '未配置';
+    $('#sync-msg').textContent = r.lastAt ? `上次同步：${r.lastAt}（拉取 ${r.lastPulled} 次，推送 ${r.lastPushed} 次）` : '还没同步过。配好口令和对方地址后，启动时和每 5 分钟自动同步一次。';
+  } catch { /* 未登录时不显示 */ }
+}
+$('#btn-sync-token')?.addEventListener('click', async () => {
+  const b = $('#btn-sync-token');
+  if (b.disabled) return;
+  b.disabled = true;
+  try {
+    const r = await api('/api/sync/token', { method: 'POST' });
+    syncTokenShown = r.token || '';
+    $('#sync-token-value').textContent = syncTokenShown;
+    $('#btn-copy-sync-token').disabled = !syncTokenShown;
+    toast('同步口令已生成（只显示这一次），去其他服务器上填同一个口令');
+  } catch (err) { handleAuthErr(err); }
+  finally { b.disabled = false; }
+});
+$('#btn-copy-sync-token')?.addEventListener('click', async () => {
+  if (!syncTokenShown) return;
+  await copyText(syncTokenShown);
+  toast('同步口令已复制');
+});
+$('#btn-sync-save')?.addEventListener('click', async () => {
+  const b = $('#btn-sync-save');
+  if (b.disabled) return;
+  b.disabled = true;
+  try {
+    const r = await api('/api/sync/config', { method: 'POST', body: JSON.stringify({ token: $('#sync-token').value.trim(), peers: $('#sync-peers').value.split('\n').map((u) => u.trim()).filter(Boolean) }) });
+    $('#sync-token').value = '';
+    $('#sync-status').textContent = r.configured ? '已配置' : '未配置';
+    toast(r.configured ? '已保存，启动时和每 5 分钟自动同步' : '已保存，还差同步口令或对方地址');
+    refreshSyncStatus();
+  } catch (err) { handleAuthErr(err); }
+  finally { b.disabled = false; }
+});
+$('#btn-sync-run')?.addEventListener('click', async () => {
+  const b = $('#btn-sync-run');
+  if (b.disabled) return;
+  b.disabled = true;
+  try {
+    const r = await api('/api/sync/run', { method: 'POST' });
+    toast(r.pulled || r.pushed ? `同步完成：拉取 ${r.pulled} 次，推送 ${r.pushed} 次` : '数据已经是最新，不用同步');
+    await loadAll();
+    refreshSyncStatus();
+  } catch (err) { handleAuthErr(err); }
+  finally { b.disabled = false; }
+});
 
 /* 数字滚动 */
 function countUp(el, val) {

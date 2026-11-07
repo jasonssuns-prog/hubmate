@@ -11,7 +11,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="apple-touch-icon" href="/icon-180.png">
-<link rel="stylesheet" href="/style.css?v=20261107-59">
+<link rel="stylesheet" href="/style.css?v=20261107-61">
 </head>
 <body class="mode-preview" data-theme="neon">
 
@@ -57,6 +57,11 @@
     <div id="landing-checkin-list" class="landing-scroll"><div class="skel"><i></i><i></i><i></i></div></div>
     <div id="landing-checkin-hint" class="scroll-hint hidden">↕ 框内滚动查看全部</div>
   </section>
+  <section class="landing-sec" id="landing-status">
+    <h2>🟢 服务状态 <span class="sec-count" id="landing-status-count"></span></h2>
+    <p class="muted">每 6 小时自动检测一次，各服务最近 7 天的在线率。</p>
+    <div id="landing-status-list" class="landing-scroll"></div>
+  </section>
   <section class="landing-sec" id="landing-fav">
     <h2>★ 我的收藏 <span class="sec-count" id="landing-fav-count"></span></h2>
     <p class="muted">登录后在服务卡片上点 ☆ 收藏，就会归拢到这里。</p>
@@ -98,6 +103,9 @@
       <a href="#sec-data" class="nav-item"><i>🏆</i>数据中心</a>
       <a href="#sec-notify" class="nav-item live-only"><i>🔔</i>通知设置</a>
       <a href="#sec-apitoken" class="nav-item live-only"><i>🔑</i>API 令牌</a>
+      <a href="#sec-totp" class="nav-item live-only"><i>🔐</i>二次验证</a>
+      <a href="#sec-github" class="nav-item live-only"><i>☁️</i>GitHub 备份</a>
+      <a href="#sec-sync" class="nav-item live-only"><i>🔄</i>多服务器同步</a>
       <a href="#sec-dupes" class="nav-item live-only"><i>♻️</i>重复清理</a>
       <a href="#sec-pwreuse" class="nav-item live-only"><i>🔐</i>密码复用 <span class="nav-badge" id="pwreuse-nav-count"></span></a>
       <a href="#sec-cats" class="nav-item live-only"><i>🏷️</i>分类管理</a>
@@ -126,6 +134,7 @@
         <button id="btn-restore" class="btn ghost small live-only" title="从备份文件恢复（会先自动备份当前数据）">⬆️ 恢复</button>
         <input type="file" id="restore-file" accept=".json,application/json" class="hidden">
         <button id="btn-csv-export" class="btn ghost small live-only" title="把全部服务导出为 CSV 表格">📊 CSV 导出</button>
+        <button id="btn-acc-export" class="btn ghost small live-only" title="把全部账号导出为 CSV（可导进密码管理器；文件里含密码，妥善保管）">🔐 账号导出</button>
         <button id="btn-csv-import" class="btn ghost small live-only" title="从 CSV 表格批量导入服务">📥 CSV 导入</button>
         <input type="file" id="csv-file" accept=".csv,text/csv" class="hidden">
         <button id="btn-linkcheck" class="btn ghost small live-only" title="逐个探活，疑似失效的标在卡片上">🔗 检测链接</button>
@@ -273,6 +282,61 @@
       </ol>
     </section>
 
+    <section class="panel live-only" id="sec-totp">
+      <div class="panel-head">
+        <h2>🔐 二次验证</h2>
+        <span id="totp-status" class="muted"></span>
+      </div>
+      <div class="help-fold"><button class="help-toggle" type="button">📖 说明 ▾</button><div class="help-body"><p class="muted">给登录再加一层：密码对了还要输手机 Authenticator（Google Authenticator、微软 Authenticator、1Password 都行）里的 6 位动态码。密钥只存在你的服务器上，备份里不带它；启用前先在手机里绑好，输一次动态码确认。关掉也要密码 + 动态码双重确认。</p></div></div>
+      <div class="cal-sub-row"><code id="totp-secret" style="word-break:break-all">还没生成密钥</code><button class="btn small ghost" id="btn-copy-totp" disabled>复制密钥</button></div>
+      <div class="fgrid">
+        <label class="span2">确认动态码（Authenticator 里显示的 6 位数字）<input id="totp-code" inputmode="numeric" maxlength="6" placeholder="6 位数字"></label>
+      </div>
+      <div class="modal-acts" style="justify-content:flex-start">
+        <button id="btn-totp-setup" class="btn primary">生成密钥</button>
+        <button id="btn-totp-enable" class="btn primary">启用二次验证</button>
+        <button id="btn-totp-disable" class="btn ghost">关闭二次验证</button>
+      </div>
+      <p class="muted" id="totp-msg">启用步骤：点“生成密钥”→ 在 Authenticator 里手动添加账号，密钥填上面那串（或把 otpauth 链接粘到支持的工具里）→ 输一次动态码点“启用二次验证”。</p>
+    </section>
+
+    <section class="panel live-only" id="sec-github">
+      <div class="panel-head">
+        <h2>☁️ GitHub 备份</h2>
+        <span id="github-status" class="muted"></span>
+      </div>
+      <div class="help-fold"><button class="help-toggle" type="button">📖 说明 ▾</button><div class="help-body"><p class="muted">每天自动把数据推到你的一个私有 GitHub 仓库（单个文件 hubmate-backup.json，Git 历史就是备份历史），服务器挂了也能从 GitHub 恢复。推之前去掉登录密码、Telegram Token、API 令牌、二次验证密钥和自动签到的请求头；数据没变就不推。Token 需要 repo 权限（classic Token 勾 repo，或 fine-grained Token 给仓库的 Contents 写权限）。</p></div></div>
+      <div class="fgrid">
+        <label class="span2">GitHub Token（只存服务端，留空表示不改）<input id="gh-token" type="password" autocomplete="off" placeholder="ghp_… 或 github_pat_…"></label>
+        <label class="span2">私有仓库（用户名/仓库名）<input id="gh-repo" placeholder="比如 jasonssuns-prog/hubmate-data"></label>
+        <label>分支<input id="gh-branch" value="main"></label>
+      </div>
+      <div class="modal-acts" style="justify-content:flex-start">
+        <button id="btn-gh-save" class="btn primary">保存设置</button>
+        <button id="btn-gh-run" class="btn ghost">立即备份</button>
+      </div>
+      <p class="muted" id="gh-msg"></p>
+    </section>
+
+    <section class="panel live-only" id="sec-sync">
+      <div class="panel-head">
+        <h2>🔄 多服务器同步</h2>
+        <span id="sync-status" class="muted"></span>
+      </div>
+      <div class="help-fold"><button class="help-toggle" type="button">📖 说明 ▾</button><div class="help-body"><p class="muted">把服务台同时部署在几台服务器上，数据自动同步：一台宕机了用另一台继续，宕机的那台启动后 30 秒内自动从对方拉最新数据。每台服务器配同一个同步口令（只在自己的服务器之间用，能读写整盘数据，别外泄）和对方的地址。同步是“谁新谁赢”：别在同一秒内往两台服务器上写东西，平时只用一台写，另一台就是热备。同步前会自动备份当前数据（保留最近 5 份）。</p></div></div>
+      <div class="cal-sub-row"><code id="sync-token-value" style="word-break:break-all">还没生成同步口令</code><button class="btn small ghost" id="btn-copy-sync-token" disabled>复制口令</button></div>
+      <div class="fgrid">
+        <label class="span2">同步口令（已有的直接填；留空表示不改）<input id="sync-token" type="password" autocomplete="off" placeholder="和其他服务器上同一个口令"></label>
+        <label class="span2">对方服务器地址（一行一个，填完整的 https 地址）<textarea id="sync-peers" rows="2" placeholder="https://7788-xxx.instabox.tech"></textarea></label>
+      </div>
+      <div class="modal-acts" style="justify-content:flex-start">
+        <button id="btn-sync-token" class="btn primary">生成口令</button>
+        <button id="btn-sync-save" class="btn primary">保存设置</button>
+        <button id="btn-sync-run" class="btn ghost">立即同步</button>
+      </div>
+      <p class="muted" id="sync-msg"></p>
+    </section>
+
     <section class="panel live-only" id="sec-dupes">
       <div class="panel-head">
         <h2>♻️ 重复清理</h2>
@@ -345,6 +409,7 @@
 
     <div id="sec-services">
       <div id="chips" class="chips"></div>
+      <div id="tag-row" class="chips" style="margin-top:6px"></div>
       <div class="toolbar">
         <input id="search" placeholder="🔍 搜名称 / 账号 / 网址 / 备注…">
         <span id="stats" class="muted"></span>
@@ -377,6 +442,10 @@
         <div id="ach-grid" class="ach-grid"></div>
       </section>
     </div>
+    <section class="panel live-only" id="sec-health">
+      <div class="panel-head"><h2>💚 最需要注意的服务</h2><span class="muted">健康分最低的 5 个（在线率 + 到期远近 + 签到 + 死链）</span></div>
+      <div id="health-list"></div>
+    </section>
 
     <footer class="foot">
       🗂️ 我的服务台 · 本地私有部署 · 数据仅存于本服务器<br>
@@ -392,6 +461,7 @@
     <form id="login-form" class="fgrid">
       <label class="span2">用户名<input id="l-user" autocomplete="username" required></label>
       <label class="span2">密码<input id="l-pass" type="password" autocomplete="current-password" required></label>
+      <label class="span2" id="l-totp-row" style="display:none">二次验证动态码<input id="l-totp" inputmode="numeric" autocomplete="one-time-code" placeholder="Authenticator 里的 6 位数字" maxlength="6"></label>
       <label class="span2">验证码
         <span class="captcha-row">
           <input id="l-captcha" autocomplete="off" placeholder="输入图中字符" required>
@@ -427,6 +497,7 @@
         </select>
       </label>
       <label class="span2">网址<input id="f-url" placeholder="https://…"></label>
+      <label class="span2">标签（逗号分隔，比如 VPS，免费；一个服务可打多个标签）<input id="f-tags" placeholder="比如 VPS，免费"></label>
       <label>注册 / 购买日期<input id="f-registered" type="date"></label>
       <label>到期日<input id="f-expires" type="date"></label>
       <label>价格<input id="f-price" placeholder="如 $10/年"></label>
@@ -439,6 +510,25 @@
       </label>
       <label>签到间隔（天，1=每天）<input id="f-every-days" type="number" min="1" max="365" value="1"></label>
       <label>续期周期（天，365=一年）<input id="f-renew-days" type="number" min="1" max="3650" value="365"></label>
+      <div class="span2" style="border-top:1px dashed rgba(255,255,255,.15);padding-top:10px;margin-top:4px">
+        <label style="display:flex;gap:6px;align-items:center"><input id="f-autosignin-enabled" type="checkbox" style="width:auto"> 🤖 自动签到（服务器每天定时替你签）</label>
+        <p class="muted" style="margin:6px 0 8px">只适合没有人机验证的纯接口签到：填一个能签到的请求，服务器每小时跑一轮，成功才记签到，失败不记、照常 Telegram 提醒你手动签。带验证码 / 登录表单的站签不了，别填。</p>
+        <label>签到接口网址<input id="f-autosignin-url" placeholder="https://…/api/checkin"></label>
+        <label>请求方法
+          <select id="f-autosignin-method">
+            <option value="POST">POST</option>
+            <option value="GET">GET</option>
+          </select>
+        </label>
+        <label>请求头（一行一个，格式 名字: 值；比如 Authorization: Bearer xxx）<textarea id="f-autosignin-headers" rows="2" placeholder="Authorization: Bearer xxx"></textarea></label>
+        <label>请求正文（POST 用）<textarea id="f-autosignin-body" rows="2" placeholder='{"action":"checkin"}'></textarea></label>
+        <label>响应里要包含的文字（可选，填了才认成功）<input id="f-autosignin-expect" placeholder="比如 success"></label>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+          <button id="btn-autosignin-test" class="btn small ghost" type="button">测试这个请求</button>
+          <span id="autosignin-test-msg" class="muted"></span>
+        </div>
+        <p class="muted" id="autosignin-last" style="margin:8px 0 0"></p>
+      </div>
       </div></div>
       <label class="span2">备注第一行会显示成卡片上的加粗介绍<textarea id="f-notes" rows="2"></textarea></label>
       <label class="span2"><input id="f-fav" type="checkbox" style="width:auto"> ★ 收藏这个网站（会显示在首页“我的收藏”里）</label>
@@ -499,6 +589,6 @@
 </div>
 
 <div id="toast"></div>
-<script src="/app.js?v=20261107-59"></script>
+<script src="/app.js?v=20261107-61"></script>
 </body>
 </html>
