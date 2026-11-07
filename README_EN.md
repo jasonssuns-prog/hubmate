@@ -19,13 +19,16 @@ Pure Node.js with **zero dependencies** (no `npm install`), data lives in a sing
 ### Service management
 - **CRUD**: name, category, URL, price, notes; a service can hold multiple accounts (main/alt)
 - **Accounts manager**: the "👤 Accounts" button on a card opens a dedicated accounts dialog (separate from the service edit page) — view accounts, copy credentials, sign in, set the default, add, edit, and delete accounts. The service edit page has no account fields, so managing accounts can't accidentally change service info
+- **Password generator**: in the accounts dialog, hit "🎲 Generate" to create a random strong password (12/16/20/24 chars, upper + lower + digit + symbol, ambiguous characters excluded) and fill it into the password field
+- **Duplicate service**: a "Duplicate" button on the card copies a service (name gets " 副本"); check-in records and renewal history are not copied, accounts are
+- **Bulk edit**: in bulk mode, besides moving and deleting, you can change the check-in interval and renewal cycle for several selected services at once (blank fields are left unchanged)
 - **Manageable categories**: custom categories (rename, change icon); only empty custom categories can be deleted
 - **Favorites**: star services, a "★ My Favorites" section on the home page; the "Favorites" category groups in too
 - **Password reuse warning**: if the same password is used on multiple accounts, it is flagged (grouped by password, tap the eye to reveal it) so you can change them to different ones
 - **Bulk mode**: select multiple services, move them to another category or delete them at once
 - **Reorder**: move cards up / down, your order stays
 - **Duplicate cleanup**: finds services with the same name or domain, clean them up in one place
-- **Dead-link checks**: every 6 hours it HEAD-checks your URLs and flags ones that look dead ⚠️
+- **Dead-link checks**: every 6 hours it HEAD-checks your URLs and flags ones that look dead ⚠️; every probe is recorded, and cards show each site's uptime over the last 7 / 30 days
 - **Search**: search by name / account / URL / notes when logged in; the public home page is searchable too
 
 ### Check-ins & XP
@@ -42,6 +45,7 @@ Pure Node.js with **zero dependencies** (no `npm install`), data lives in a sing
 - **Expiring soon**: services expiring within 30 days listed in the sidebar (with a count badge), most urgent first; a banner on top for anything due within 7 days
 - **Renew**: extends by the service's own renewal cycle (from the old expiry date if not expired, from today if expired; 365 days = +1 year, Feb 29 → Feb 28)
 - **Undo renewal**: renewed by mistake? Undo restores the previous expiry date
+- **Renewal history**: every renewal is logged (when, from which date to which date); expand it from the expiring row with "📜 Records", and cards show the last renewal date; undoing a renewal removes its log entry too
 - **Cycle auto-fill**: expiry = registration/purchase date + renewal cycle — change either one and the other fills in; renewing also moves the start date to the new cycle start so the loop keeps going (a manually edited expiry is never auto-overwritten)
 - **Expiry only changes the record**: the renew button only edits the date here — it does not pay the vendor for you
 - **Calendar subscription**: a public `.ics` feed (`/api/calendar.ics`) — subscribe in your phone calendar and every expiry shows up automatically, with reminders 3 days and 1 day before; it contains only service names and expiry dates, no accounts or passwords
@@ -57,8 +61,11 @@ Pure Node.js with **zero dependencies** (no `npm install`), data lives in a sing
 - Repeat reminders are configurable (off by default): after the fixed reminder, re-check every N hours
 - Test it from the settings page — the test message uses the exact same layout as the real reminders; the token lives only on the server and is never sent to the frontend
 
+### API token (iOS Shortcuts)
+- Generate a dedicated token from the sidebar's "🔑 API token" panel and use it in an iOS Shortcut to sign in without opening the page; the token only authorizes the check-in endpoints (sign all, sign one service) and nothing else; it is shown once when generated, can be revoked anytime, and is never included in backup exports
+
 ### Backup & security
-- **Backup / restore**: one-click backup download (login password hash and Telegram token are stripped automatically); restoring auto-saves the current data first (keeps the last 5)
+- **Backup / restore**: one-click backup download (login password hash, Telegram token, and API token are stripped automatically); restoring auto-saves the current data first (keeps the last 5)
 - **Export ledger**: generates a `服务台账.md` (service ledger) for easy reading
 - **Login captcha**: built-in image captcha (one-time, 5-minute expiry, checked before the password) + per-IP rate limiting (10 attempts / 10 min)
 - **Security headers + CSP, gzip, ETag caching**, systemd sandbox running as a low-privilege user
