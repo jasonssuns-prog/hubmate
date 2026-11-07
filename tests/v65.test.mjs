@@ -180,20 +180,20 @@ const F = loadFrontend();
 
 console.log('== 前端：accountSecurityScore ==');
 {
-  // 强密码：16 位、四类齐全、不复用、刚换过 = 100
-  eq('强密码 100', F.accountSecurityScore({ password: 'Abc12345!@#$xyz9', passwordChangedAt: '2026-11-01' }, [{ password: 'Abc12345!@#$xyz9' }]), 100);
-  // 短密码：5 位、只有小写 = 100-25-15（缺大写/数字/符号）= 60
-  eq('弱密码', F.accountSecurityScore({ password: 'abcde' }, [{ password: 'abcde' }]), 60);
-  // 复用扣 30：12 位、四类齐全（100-5 长度=95）再 -30 = 65
-  eq('复用扣 30', F.accountSecurityScore({ password: 'Abcdef123456!@', passwordChangedAt: '2026-11-01' }, [{ password: 'Abcdef123456!@' }, { password: 'Abcdef123456!@' }]), 65);
-  // 超 90 天没换扣 20：16 位四类齐全 100-20=80
-  eq('超 90 天扣 20', F.accountSecurityScore({ password: 'Abc12345!@#$xyz9', passwordChangedAt: '2026-07-01' }, [{ password: 'Abc12345!@#$xyz9' }]), 80);
+  // 强密码：16 位、四类齐全、不复用、刚换过 = 原始分 5 → 100（和 Node 版同一口径）
+  eq('强密码 100', F.accountSecurityScore({ password: 'Abc12345!@#$xyz9', passwordChangedAt: '2026-11-01' }, [{ password: 'Abc12345!@#$xyz9' }]).score, 100);
+  // 短密码：5 位、只有小写 = 原始分 1 → 20
+  eq('弱密码', F.accountSecurityScore({ password: 'abcde' }, [{ password: 'abcde' }]).score, 20);
+  // 复用扣 3：14 位、四类齐全（原始分 5）再 -3 = 2 → 40
+  eq('复用扣 3', F.accountSecurityScore({ password: 'Abcdef123456!@', passwordChangedAt: '2026-11-01' }, [{ password: 'Abcdef123456!@' }, { password: 'Abcdef123456!@' }]).score, 40);
+  // 超 90 天没换扣 2：16 位四类齐全（原始分 5）再 -2 = 3 → 60
+  eq('超 90 天扣 2', F.accountSecurityScore({ password: 'Abc12345!@#$xyz9', passwordChangedAt: '2026-07-01' }, [{ password: 'Abc12345!@#$xyz9' }]).score, 60);
   // 没改密日期不扣分
-  eq('未知改密日期不扣', F.accountSecurityScore({ password: 'Abc12345!@#$xyz9' }, [{ password: 'Abc12345!@#$xyz9' }]), 100);
+  eq('未知改密日期不扣', F.accountSecurityScore({ password: 'Abc12345!@#$xyz9' }, [{ password: 'Abc12345!@#$xyz9' }]).score, 100);
   // 没密码 0 分
-  eq('没密码 0 分', F.accountSecurityScore({ password: '' }, []), 0);
-  eq('弱点清单', F.securityReasons({ password: 'abcde' }, [{ password: 'abcde' }]), ['密码太短（<8 位）', '缺大写、数字、符号', '改密时间未知']);
-  eq('复用弱点', F.securityReasons({ password: 'Abcdef123456!@', passwordChangedAt: '2026-11-01' }, [{ password: 'Abcdef123456!@' }, { password: 'Abcdef123456!@' }]), ['多处复用']);
+  eq('没密码 0 分', F.accountSecurityScore({ password: '' }, []).score, 0);
+  eq('弱点清单', F.securityReasons({ password: 'abcde' }, [{ password: 'abcde' }]), ['密码太短（不到 8 位）', '字符种类太少']);
+  eq('复用弱点', F.securityReasons({ password: 'Abcdef123456!@', passwordChangedAt: '2026-11-01' }, [{ password: 'Abcdef123456!@' }, { password: 'Abcdef123456!@' }]), ['多处复用（2 个账号在用）']);
 }
 
 console.log('== 前端：suggestCategory ==');

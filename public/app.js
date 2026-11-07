@@ -171,46 +171,41 @@ function healthScore(s) {
 function healthClass(score) {
   return score === null ? '' : (score >= 80 ? 'b-ok' : (score >= 50 ? 'b-warn' : 'b-bad'));
 }
-/* v65：账号安全评分（0–100，纯函数）。规则：长度 <8 扣 25、8–11 扣 12、12–15 扣 5；
-   大写/小写/数字/符号每缺一类扣 5；密码在多个账号上复用扣 30；上次改密超过 90 天扣 20
-   （复用与超期的权重比 3:2，和 Node 版同一套规则）；没填 passwordChangedAt 按“未知”
-   处理不扣分；没填密码直接 0 分。 */
-function accountSecurityScore(acc, allAccounts) {
+/* v65：账号安全评分（0–100，纯函数，和 Node 版 main 分支同一套口径）。
+   原始分 0–5：长度 8–11 位 +1、12 位以上 +2；字符种类（大小写/数字/符号）
+   最多 +3；密码在多个账号上复用 −3；上次改密超过 90 天 −2；没填
+   passwordChangedAt 按“未知”处理不扣分；没填密码直接 0 分。
+   分数 = 原始分 / 5 × 100。返回 {score, issues}。 */
+function accountSecurityScore(acc, allAccs) {
   const pw = String(acc?.password || '');
-  if (!pw) return 0;
-  let score = 100;
-  if (pw.length < 8) score -= 25;
-  else if (pw.length < 12) score -= 12;
-  else if (pw.length < 16) score -= 5;
-  if (!/[A-Z]/.test(pw)) score -= 5;
-  if (!/[a-z]/.test(pw)) score -= 5;
-  if (!/[0-9]/.test(pw)) score -= 5;
-  if (!/[^A-Za-z0-9]/.test(pw)) score -= 5;
-  const all = allAccounts || [];
-  if (all.length && all.filter((a) => a && String(a.password || '') === pw).length > 1) score -= 30;
-  const changed = String(acc?.passwordChangedAt || '');
-  if (/^\d{4}-\d{2}-\d{2}$/.test(changed) && dayDiff(changed, todayStr()) > 90) score -= 20;
-  return Math.max(0, score);
+  let raw = 0;
+  const issues = [];
+  if (!pw) issues.push('密码为空');
+  else if (pw.length < 8) issues.push('密码太短（不到 8 位）');
+  else if (pw.length <= 11) raw += 1;
+  else raw += 2;
+  let kinds = 0;
+  if (/[a-z]/.test(pw)) kinds++;
+  if (/[A-Z]/.test(pw)) kinds++;
+  if (/[0-9]/.test(pw)) kinds++;
+  if (/[^A-Za-z0-9]/.test(pw)) kinds++;
+  raw += Math.min(3, kinds);
+  if (pw && kinds < 2) issues.push('字符种类太少');
+  const dup = (allAccs || []).filter((x) => x.password && x.password === pw).length;
+  if (pw && dup > 1) { raw -= 3; issues.push(`多处复用（${dup} 个账号在用）`); }
+  const ch = acc?.passwordChangedAt;
+  if (ch && /^\d{4}-\d{2}-\d{2}$/.test(ch)) {
+    const d = new Date();
+    d.setDate(d.getDate() - 90);
+    const cutoff = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    if (ch < cutoff) { raw -= 2; issues.push(`超过 90 天没换密码（上次 ${ch}）`); }
+  }
+  raw = Math.max(0, raw);
+  return { score: Math.round((raw / 5) * 100), issues };
 }
 /* v65：账号安全的弱点清单（给卡片/弹窗/面板展示用） */
 function securityReasons(acc, allAccounts) {
-  const out = [];
-  const pw = String(acc?.password || '');
-  if (!pw) return ['没填密码'];
-  if (pw.length < 8) out.push('密码太短（<8 位）');
-  else if (pw.length < 12) out.push('密码偏短（<12 位）');
-  const missing = [];
-  if (!/[A-Z]/.test(pw)) missing.push('大写');
-  if (!/[a-z]/.test(pw)) missing.push('小写');
-  if (!/[0-9]/.test(pw)) missing.push('数字');
-  if (!/[^A-Za-z0-9]/.test(pw)) missing.push('符号');
-  if (missing.length) out.push('缺' + missing.join('、'));
-  const all = allAccounts || [];
-  if (all.length && all.filter((a) => a && String(a.password || '') === pw).length > 1) out.push('多处复用');
-  const changed = String(acc?.passwordChangedAt || '');
-  if (/^\d{4}-\d{2}-\d{2}$/.test(changed) && dayDiff(changed, todayStr()) > 90) out.push(`超 ${dayDiff(changed, todayStr())} 天没换`);
-  else if (!changed) out.push('改密时间未知');
-  return out;
+  return accountSecurityScore(acc, allAccounts).issues;
 }
 function securityClass(score) {
   return score === null ? '' : (score >= 80 ? 'b-ok' : (score >= 50 ? 'b-warn' : 'b-bad'));
@@ -675,7 +670,7 @@ function cardHTML(s, idx) {
   let secBadge = '';
   if (live() && accs.length) {
     const all = allAccounts();
-    const worst = Math.min(...accs.map((a) => accountSecurityScore(a, all)));
+    const worst = Math.min(...accs.map((a) => accountSecurityScore(a, all).score));
     if (worst < 60) secBadge = `<span class="badge b-bad" title="这个服务有个账号密码不安全（${worst} 分），点 👤 账号进去看">🔐 ${worst} 分</span>`;
   }
   const tagChips = (s.tags || []).map((t) => `<button class="tag-chip" data-tag="${esc(t)}" title="只看带“${esc(t)}”标签的服务">${esc(t)}</button>`).join('');
@@ -1104,7 +1099,7 @@ function renderAccManager() {
         : `<button class="btn small primary" data-act="checkin-acc" data-id="${svc.id}" data-acc="${esc(a.id)}">签到</button>`)
       : '';
     /* v65：链接到库的账号标“🔗 库”，安全分和弱点直接显示；本地账号可以一键存入账号库 */
-    const score = accountSecurityScore(a, all);
+    const score = accountSecurityScore(a, all).score;
     const reasons = securityReasons(a, all);
     const secLine = `<span class="badge ${securityClass(score)}" title="${esc(reasons.join('、'))}">🔐 ${score} 分</span>`;
     const linkTag = a.sharedId ? '<span class="acc-default-tag">🔗 库</span>' : '';
@@ -2251,7 +2246,7 @@ function renderVault() {
     if (a.sharedId) (linked[a.sharedId] = linked[a.sharedId] || []).push(s.name);
   }
   box.innerHTML = vault.map((v) => {
-    const score = accountSecurityScore(v, all);
+    const score = accountSecurityScore(v, all).score;
     const use = linked[v.id] || [];
     return `<div class="landing-checkin-item"><span class="ck">🔐</span><span class="ck-name">${esc(v.label)}</span><span class="ck-note">${esc(v.username || '')}${v.passwordChangedAt ? ` · 上次改密 ${esc(v.passwordChangedAt)}` : ' · 改密时间未知'}${use.length ? ` · ${use.length} 个服务在用` : ' · 还没服务用它'}</span><span class="badge ${securityClass(score)}" title="${esc(securityReasons(v, all).join('、'))}">🔐 ${score} 分</span><button class="btn small ghost" data-act="vault-edit" data-id="${esc(v.id)}">编辑</button><button class="btn small ghost" data-act="vault-del" data-id="${esc(v.id)}">删除</button></div>`;
   }).join('');
@@ -2323,7 +2318,7 @@ function renderSecScore() {
   const rows = [];
   for (const s of services) {
     for (const a of accountList(s)) {
-      rows.push({ serviceId: s.id, service: s.name, acc: a, score: accountSecurityScore(a, all), reasons: securityReasons(a, all) });
+      rows.push({ serviceId: s.id, service: s.name, acc: a, score: accountSecurityScore(a, all).score, reasons: securityReasons(a, all) });
     }
   }
   rows.sort((x, y) => x.score - y.score);
