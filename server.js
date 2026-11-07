@@ -342,26 +342,29 @@ function syncAchievements(data) {
   if (data.xp >= 100) award('xp100');
   return unlocked;
 }
-function metaPayload(data) {
+/* v67：meta 按用户取——用户名/是否默认密码/管理员身份走用户记录，其余走该用户的业务数据 */
+function metaPayload(user, u) {
   const t = todayStr();
-  const daily = dailyServices(data);
-  const best = Math.max(0, ...data.services.map((s) => maxRun(s.checkins || [])));
+  const daily = dailyServices(u);
+  const best = Math.max(0, ...u.services.map((s) => maxRun(s.checkins || [])));
   return {
-    username: data.username,
-    xp: data.xp,
-    level: levelOf(data.xp),
-    passwordIsDefault: data.passwordIsDefault !== false,
-    totpEnabled: !!data.totpEnabled,
-    categories: categoriesOf(data).map(normCat),
+    username: user.username,
+    userId: user.id,
+    isAdmin: !!user.isAdmin,
+    xp: u.xp,
+    level: levelOf(u.xp),
+    passwordIsDefault: user.passwordIsDefault !== false,
+    totpEnabled: !!u.totpEnabled,
+    categories: categoriesOf(u).map(normCat),
     stats: {
-      services: data.services.length,
-      totalCheckins: data.services.reduce((n, s) => n + (s.checkins || []).length, 0),
+      services: u.services.length,
+      totalCheckins: u.services.reduce((n, s) => n + (s.checkins || []).length, 0),
       bestStreak: best,
       dailyTotal: daily.length,
       doneToday: daily.filter((s) => (s.checkins || []).includes(t)).length
     },
-    achievements: ACH_DEFS.map((a) => ({ ...a, unlockedAt: data.achievements[a.id] || null })),
-    history: data.history
+    achievements: ACH_DEFS.map((a) => ({ ...a, unlockedAt: u.achievements[a.id] || null })),
+    history: u.history
   };
 }
 function publicServices(data) {
@@ -396,66 +399,125 @@ function publicServices(data) {
   }));
 }
 
+/* ---------- v67：多用户——data.json 里 users 存账号，userData 按 userId 存各用户的业务数据 ----------
+   第一个默认用户是管理员（isAdmin），只有他能建用户、生成邀请码；
+   各用户只能看到自己的服务/笔记/账号库/签到/经验/分类/通知等，互相看不到；
+   GitHub 备份和多服务器同步是整盘的（所有用户的数据都在里面），保持全局、管理员配 */
+const USER_DATA_FIELDS = ['services', 'notes', 'xp', 'achievements', 'flags', 'history', 'categories', 'notify', 'totpSecret', 'totpEnabled', 'apiToken', 'loginHistory', 'sharedAccounts', 'monthlyReports', 'archivedLog'];
+function defaultUserData() {
+  return { services: [], notes: [], xp: 0, achievements: {}, flags: {}, history: {}, notify: {}, totpSecret: '', totpEnabled: false, apiToken: '', loginHistory: [], sharedAccounts: [], monthlyReports: [], archivedLog: [] };
+}
+function adminUser(data) {
+  const users = Array.isArray(data.users) ? data.users : [];
+  return users.find((x) => x && x.isAdmin) || users[0] || null;
+}
+function findUser(data, id) {
+  return (Array.isArray(data.users) ? data.users : []).find((x) => x && x.id === id) || null;
+}
+function findUserByName(data, name) {
+  const n = String(name || '').trim().toLowerCase();
+  if (!n) return null;
+  return (Array.isArray(data.users) ? data.users : []).find((x) => x && String(x.username || '').toLowerCase() === n) || null;
+}
+/* 取某用户的业务数据对象（没有就建一份空的）；调用方再 ensureMeta 补默认值 */
+function userData(data, userId) {
+  if (!data.userData || typeof data.userData !== 'object') data.userData = {};
+  let u = data.userData[userId];
+  if (!u || typeof u !== 'object') { u = defaultUserData(); data.userData[userId] = u; }
+  return u;
+}
+/* 邀请码：HUB-XXXX-XXXX-XXXX，12 位字母数字（去掉易混的 0/O/1/I），一次用完 */
+function makeInviteCode() {
+  const abc = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+  let s = '';
+  for (let i = 0; i < 12; i++) s += abc[crypto.randomInt(abc.length)];
+  return `HUB-${s.slice(0, 4)}-${s.slice(4, 8)}-${s.slice(8, 12)}`;
+}
+/* 公开给前端的用户信息——绝不含密码哈希 */
+function publicUser(data, user) {
+  const u = userData(data, user.id);
+  return { id: user.id, username: user.username, isAdmin: !!user.isAdmin, banned: !!user.banned, createdAt: user.createdAt || '', lastLoginAt: user.lastLoginAt || '', services: (u.services || []).length, xp: u.xp || 0 };
+}
+
 /* ---------- 数据 ---------- */
 function loadData() {
   let data = readJSON(DATA_FILE, null);
-  if (!data || !Array.isArray(data.services)) {
+  /* 全新安装：直接建新结构（管理员 jason + 两条示例服务） */
+  if (!data || typeof data !== 'object' || (!Array.isArray(data.users) && !Array.isArray(data.services))) {
+    const adminId = crypto.randomBytes(12).toString('hex');
+    const u = defaultUserData();
+    u.services = [
+      {
+        id: crypto.randomBytes(12).toString('hex'),
+        name: '示例 · 某签到中转站',
+        category: 'checkin',
+        url: 'https://example.com',
+        account: 'jason',
+        secret: '',
+        registeredAt: '2026-10-20',
+        expiresAt: '',
+        price: '',
+        checkinFrequency: 'daily',
+        notes: '示例数据：签到送额度。在卡片上可以编辑或删除。',
+        checkins: ['2026-10-25', '2026-10-26']
+      },
+      {
+        id: crypto.randomBytes(12).toString('hex'),
+        name: '示例 · 一台 VPS',
+        category: 'vps',
+        url: '',
+        account: 'root',
+        secret: '',
+        registeredAt: '2026-01-10',
+        expiresAt: '2026-11-03',
+        price: '$10/年',
+        checkinFrequency: 'none',
+        notes: '示例数据：演示 7 天内到期提醒。',
+        checkins: []
+      }
+    ];
     data = {
-      username: 'jason',
-      passwordHash: hashPassword('jason123'),
-      xp: 0,
-      achievements: {},
-      flags: {},
-      history: {},
-      services: [
-        {
-          id: crypto.randomBytes(12).toString('hex'),
-          name: '示例 · 某签到中转站',
-          category: 'checkin',
-          url: 'https://example.com',
-          account: 'jason',
-          secret: '',
-          registeredAt: '2026-10-20',
-          expiresAt: '',
-          price: '',
-          checkinFrequency: 'daily',
-          notes: '示例数据：签到送额度。在卡片上可以编辑或删除。',
-          checkins: ['2026-10-25', '2026-10-26']
-        },
-        {
-          id: crypto.randomBytes(12).toString('hex'),
-          name: '示例 · 一台 VPS',
-          category: 'vps',
-          url: '',
-          account: 'root',
-          secret: '',
-          registeredAt: '2026-01-10',
-          expiresAt: '2026-11-03',
-          price: '$10/年',
-          checkinFrequency: 'none',
-          notes: '示例数据：演示 7 天内到期提醒。',
-          checkins: []
-        }
-      ]
+      users: [{ id: adminId, username: 'jason', passwordHash: hashPassword('jason123'), passwordIsDefault: true, isAdmin: true, banned: false, createdAt: todayStr(), lastLoginAt: '' }],
+      inviteCodes: [],
+      userData: { [adminId]: u }
     };
     writeJSON(DATA_FILE, data);
+    return data;
   }
-  ensureMeta(data);
-  /* 旧数据迁移：补齐排序与访问次数字段；单个账号迁成 accounts 数组 */
+  /* v67 一次性迁移：旧结构（顶层 username/services/……）→ users + userData；
+     只做一次：顶层业务字段挪进第一个默认用户（管理员）的 userData，顶层只留全局配置 */
+  if (!Array.isArray(data.users)) {
+    const adminId = crypto.randomBytes(12).toString('hex');
+    const u = defaultUserData();
+    for (const k of USER_DATA_FIELDS) {
+      if (data[k] !== undefined) { u[k] = data[k]; delete data[k]; }
+    }
+    data.users = [{ id: adminId, username: data.username || 'jason', passwordHash: data.passwordHash || hashPassword('jason123'), passwordIsDefault: data.passwordIsDefault !== false, isAdmin: true, banned: false, createdAt: todayStr(), lastLoginAt: '' }];
+    delete data.username; delete data.passwordHash; delete data.passwordIsDefault;
+    data.inviteCodes = [];
+    data.userData = { [adminId]: u };
+    writeJSON(DATA_FILE, data);
+  }
+  if (!Array.isArray(data.inviteCodes)) data.inviteCodes = [];
+  if (!data.userData || typeof data.userData !== 'object') data.userData = {};
+  /* 每位用户的元数据补齐 + 服务归一化（原来是顶层循环，现在按用户跑） */
   let ndirty = false;
-  /* v65：新字段——共享账号库、月度报告、登录历史、归档日志；没有就补空数组 */
-  if (!Array.isArray(data.sharedAccounts)) { data.sharedAccounts = []; ndirty = true; }
-  if (!Array.isArray(data.monthlyReports)) { data.monthlyReports = []; ndirty = true; }
-  if (!Array.isArray(data.loginHistory)) { data.loginHistory = []; ndirty = true; }
-  if (!Array.isArray(data.archivedLog)) { data.archivedLog = []; ndirty = true; }
-  const vault = vaultOf(data);
-  data.services.forEach((s, i) => {
-    if (typeof s.sortOrder !== 'number') { s.sortOrder = i; ndirty = true; }
-    if (typeof s.visits !== 'number') { s.visits = 0; ndirty = true; }
-    const snap = JSON.stringify([s.accounts, s.account, s.secret]);
-    normalizeAccounts(s, vault);
-    if (JSON.stringify([s.accounts, s.account, s.secret]) !== snap) ndirty = true;
-  });
+  for (const user of (data.users || [])) {
+    const u = userData(data, user.id);
+    if (ensureMeta(u)) ndirty = true;
+    if (!Array.isArray(u.sharedAccounts)) { u.sharedAccounts = []; ndirty = true; }
+    if (!Array.isArray(u.monthlyReports)) { u.monthlyReports = []; ndirty = true; }
+    if (!Array.isArray(u.loginHistory)) { u.loginHistory = []; ndirty = true; }
+    if (!Array.isArray(u.archivedLog)) { u.archivedLog = []; ndirty = true; }
+    const vault = vaultOf(u);
+    (u.services || []).forEach((s, i) => {
+      if (typeof s.sortOrder !== 'number') { s.sortOrder = i; ndirty = true; }
+      if (typeof s.visits !== 'number') { s.visits = 0; ndirty = true; }
+      const snap = JSON.stringify([s.accounts, s.account, s.secret]);
+      normalizeAccounts(s, vault);
+      if (JSON.stringify([s.accounts, s.account, s.secret]) !== snap) ndirty = true;
+    });
+  }
   if (ndirty) writeJSON(DATA_FILE, data);
   return data;
 }
@@ -465,16 +527,25 @@ function saveSessions(sessions) {
   for (const k of Object.keys(sessions)) if (sessions[k].created < cutoff) delete sessions[k];
   writeJSON(SESSIONS_FILE, sessions);
 }
+/* v67：会话里存 userId；v67 之前登录的老会话没有 userId，默认归第一个默认用户（管理员），
+   顺手补进会话文件里（只写一次），用户不用重新登录 */
 function currentUser(req) {
   const token = parseCookies(req.headers.cookie).session;
   if (!token) return null;
   const sessions = loadSessions();
   const rec = sessions[token];
   if (!rec || Date.now() - rec.created > SESSION_MS) return null;
-  return { token, sessions };
+  if (!rec.userId) {
+    const admin = adminUser(loadData());
+    if (!admin) return null;
+    rec.userId = admin.id;
+    saveSessions(sessions);
+  }
+  return { token, sessions, userId: rec.userId };
 }
 /* v59：API 令牌（给 iOS 快捷指令用）——只放行签到那两个接口，别的一律不认；
-   令牌放请求头 Authorization: Bearer <token> 或 ?token= 参数里 */
+   令牌放请求头 Authorization: Bearer <token> 或 ?token= 参数里；
+   v67：令牌按用户配，返回它属于哪个用户（找不到返回 null） */
 function isApiToken(req) {
   const h = req.headers.authorization || '';
   const m = h.match(/^Bearer\s+(\S+)$/i);
@@ -482,9 +553,12 @@ function isApiToken(req) {
   if (!tok) {
     try { tok = new URL(req.url, 'http://x').searchParams.get('token') || ''; } catch { tok = ''; }
   }
-  if (!tok) return false;
+  if (!tok) return null;
   const data = loadData();
-  return !!data.apiToken && data.apiToken === tok;
+  for (const [uid, u] of Object.entries(data.userData || {})) {
+    if (u && u.apiToken && u.apiToken === tok) return uid;
+  }
+  return null;
 }
 function isTokenAllowedEndpoint(pathname, method) {
   if (method !== 'POST') return false;
@@ -700,13 +774,14 @@ function notifyCfg(data) {
   return data.notify;
 }
 /* 提醒写回合并：只把本轮改过的日期字段合并到盘上最新数据里。
-   Token、Chat ID 等其他设置绝不参与合并，免得把用户刚保存的新设置盖回去 */
-function mergeNotifyWrites(fresh, n, prev) {
-  const fn = notifyCfg(fresh);
+   Token、Chat ID 等其他设置绝不参与合并，免得把用户刚保存的新设置盖回去；
+   v67：freshU 是该用户在盘上最新的业务数据对象 */
+function mergeNotifyWrites(freshU, n, prev) {
+  const fn = notifyCfg(freshU);
   for (const k of ['lastExpiring', 'lastCheckin', 'lastCheckinRepeatAt']) {
     if (n[k] !== undefined && n[k] !== prev[k]) fn[k] = n[k];
   }
-  return fresh;
+  return freshU;
 }
 function tgApiUrl(token, method) { return `https://api.telegram.org/bot${token}/${method}`; }
 /* 签到提醒消息下的按钮：点一下直接签完，不用打开网站 */
@@ -919,8 +994,10 @@ function checkinAllTodayNoWrite(data) {
   const unlocked = syncAchievements(data);
   return { signed: todo.length, accountsSigned, xpGained, allDone, unlocked, xp: data.xp, level: levelOf(data.xp) };
 }
-function checkinAllToday(data) {
-  const r = checkinAllTodayNoWrite(data);
+function checkinAllToday(data, userId) {
+  const u = userData(data, userId);
+  ensureMeta(u);
+  const r = checkinAllTodayNoWrite(u);
   writeJSON(DATA_FILE, data);
   return r;
 }
@@ -947,7 +1024,8 @@ function checkinLines(todo) {
 }
 /* 每小时检查一次；北京时间 9 点后才发（默认，设置里可改），避开半夜与日期错位。
    每天每种最多发一次：没事可推时也记下日期，不空转；发送失败不记日期，下小时重试。
-   注意：绝不在启动时立即发——每次部署都会重启服务，启动即发等于部署就骚扰一次。 */
+   注意：绝不在启动时立即发——每次部署都会重启服务，启动即发等于部署就骚扰一次。
+   v67：通知按用户配，定时任务按用户循环跑各自的提醒 */
 async function runNotifyChecks() {
   try {
     /* v65：到期自动归档（每天一次）+ 月度报告（每月 1 号）——不依赖通知渠道，没配 Telegram 也照常跑；
@@ -955,7 +1033,16 @@ async function runNotifyChecks() {
     archiveExpiredIfDue();
     await monthlyReportIfDue();
     const data = loadData();
-    const n = notifyCfg(data);
+    for (const user of (data.users || [])) {
+      const u = userData(data, user.id);
+      ensureMeta(u);
+      await runNotifyChecksForUser(user, u);
+    }
+  } catch (e) { console.error('[!] TG 定时检查异常:', e.message); }
+}
+async function runNotifyChecksForUser(user, u) {
+  try {
+    const n = notifyCfg(u);
     /* v62：任一渠道配好了就跑，不再只认 Telegram */
     if (!(n.token && n.chatId) && !n.webhookUrl && !n.barkKey && !n.serverChanKey) return;
     /* 记下本轮开始时的日期字段：写回时只合并本轮改过的，盘上更新的以盘上为准 */
@@ -973,7 +1060,7 @@ async function runNotifyChecks() {
       } catch (e) { console.error('[!] 多渠道推送异常:', e.message); return false; }
     };
     if (n.expiring !== false && n.lastExpiring !== t) {
-      const items = expiringList(data);
+      const items = expiringList(u);
       let ok = true;
       if (items.length) {
         ok = await tryPush(`服务台临期提醒 · ${t}`,
@@ -982,11 +1069,11 @@ async function runNotifyChecks() {
       if (ok) { n.lastExpiring = t; dirty = true; }
     }
     if (n.checkin !== false && n.lastCheckin !== t) {
-      const todo = unsignedDaily(data, t);
+      const todo = unsignedDaily(u, t);
       let ok = true;
       if (todo.length) {
         /* v65：密码轮换提醒——每天 17:00 的签到提醒里加一句（有 N 个账号密码超 90 天没换） */
-        const stale = stalePasswordAccounts(data);
+        const stale = stalePasswordAccounts(u);
         const rotLine = stale.length ? `\n\n🔑 另有 ${stale.length} 个账号密码超过 90 天没换，建议轮换一下。` : '';
         ok = await tryPush(`服务台签到提醒 · ${t}`,
           `⚡ <b>服务台签到提醒</b> · ${t}\n今日还有 ${todo.length} 个站未签到：\n\n${checkinLines(todo).join('\n')}${rotLine}\n\n👉 点下面按钮直接签完，别断了连签。`, CHECKIN_KB);
@@ -996,7 +1083,7 @@ async function runNotifyChecks() {
     /* 签到重复提醒：固定提醒发完后，每隔 repeatHours 小时再查一次还有没有未签；
        只在固定时间到 23 点之间推，夜里不打扰；签完了自然停；锚点就是上面固定提醒的时间。 */
     if (n.checkin !== false && n.repeatHours > 0 && n.lastCheckin === t) {
-      const todo = unsignedDaily(data, t);
+      const todo = unsignedDaily(u, t);
       const h = cstHour();
       const last = n.lastCheckinRepeatAt || 0;
       if (todo.length && h >= pushHour && h < 23 && Date.now() - last >= n.repeatHours * 3600e3) {
@@ -1006,7 +1093,12 @@ async function runNotifyChecks() {
       }
     }
     /* 写回前重读：这一小时里用户可能改过数据，只合并提醒自己改的日期字段 */
-    if (dirty) writeJSON(DATA_FILE, mergeNotifyWrites(loadData(), n, prevNotify));
+    if (dirty) {
+      const fresh = loadData();
+      const fu = userData(fresh, user.id);
+      mergeNotifyWrites(fu, n, prevNotify);
+      writeJSON(DATA_FILE, fresh);
+    }
   } catch (e) { console.error('[!] TG 定时检查异常:', e.message); }
 }
 setInterval(runNotifyChecks, 3600e3).unref();
@@ -1056,35 +1148,47 @@ function mergePollWrites(cur, mutated, snap) {
   for (const [k, v] of Object.entries(mf)) if (JSON.stringify(v) !== JSON.stringify(snap.flags[k])) cur.flags[k] = v;
   return cur;
 }
+/* v67：机器人回话按用户跑——各用户用自己的 Token/Chat ID，tgSeen 各记各的 */
 async function pollBotCommands() {
   try {
     const data = loadData();
-    const n = notifyCfg(data);
+    for (const user of (data.users || [])) {
+      const u = userData(data, user.id);
+      ensureMeta(u);
+      await pollBotCommandsForUser(user, u);
+    }
+  } catch (e) { console.error('[!] TG 命令轮询异常:', e.message); }
+}
+async function pollBotCommandsForUser(user, u) {
+  try {
+    const n = notifyCfg(u);
     if (!n.token || !n.chatId) return;
     /* 快照在先：后面网络往返期间用户可能改数据，写回时只合并轮询自己改的字段 */
-    const snap = snapshotPollState(data);
+    const snap = snapshotPollState(u);
     const res = await fetch(tgApiUrl(n.token, 'getUpdates'), {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
     });
     const j = await res.json().catch(() => ({}));
     if (!j.ok || !Array.isArray(j.result)) return;
     if (n.tgSeen === undefined) {
-      n.tgSeen = j.result.reduce((m, u) => Math.max(m, u.update_id || 0), 0);
-      writeJSON(DATA_FILE, mergePollWrites(loadData(), data, snap));
+      n.tgSeen = j.result.reduce((m, x) => Math.max(m, x.update_id || 0), 0);
+      const fresh = loadData();
+      mergePollWrites(userData(fresh, user.id), u, snap);
+      writeJSON(DATA_FILE, fresh);
       return;
     }
-    const fresh = j.result.filter((u) => (u.update_id || 0) > n.tgSeen);
+    const fresh = j.result.filter((x) => (x.update_id || 0) > n.tgSeen);
     if (!fresh.length) return;
     const t = todayStr();
-    for (const u of fresh) {
-      n.tgSeen = Math.max(n.tgSeen, u.update_id || 0);
+    for (const x of fresh) {
+      n.tgSeen = Math.max(n.tgSeen, x.update_id || 0);
       /* 按钮回调：提醒消息下的“全部签到”被点了。用不写盘版批量签到，只改内存里的
-         data 对象，最后统一做合并写回——签到结果不会丢，用户的同期改动也不会被盖掉 */
-      const cb = u.callback_query;
+         u 对象，最后统一做合并写回——签到结果不会丢，用户的同期改动也不会被盖掉 */
+      const cb = x.callback_query;
       if (cb) {
         if (String(cb.from && cb.from.id) !== String(n.chatId)) continue;
         if (cb.data === 'checkin_all') {
-          const r = checkinAllTodayNoWrite(data);
+          const r = checkinAllTodayNoWrite(u);
           await fetch(tgApiUrl(n.token, 'answerCallbackQuery'), {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ callback_query_id: cb.id, text: r.signed ? `已签到 ${r.signed} 个${r.xpGained ? `，+${r.xpGained}⚡` : ''}` : '今日已全部签完 ✓' })
@@ -1099,23 +1203,23 @@ async function pollBotCommands() {
         }
         continue;
       }
-      const msg = u.message;
+      const msg = x.message;
       if (!msg || String(msg.chat && msg.chat.id) !== String(n.chatId)) continue;
       const text = String(msg.text || '').trim();
       const send = (txt) => tgSend(n.token, n.chatId, txt).catch(() => {});
       if (text === '/start' || text === '/help') {
         await send(`🤖 <b>服务台机器人</b>\n/today 今日签到情况\n/expiring 临期服务列表`);
       } else if (text === '/today') {
-        const cohort = checkinCohort(data, t);
+        const cohort = checkinCohort(u, t);
         const done = cohort.filter((s) => (s.checkins || []).includes(t)).length;
-        const todo = unsignedDaily(data, t);
+        const todo = unsignedDaily(u, t);
         const body = todo.length
           ? `今日签到 ${done}/${cohort.length}，还有 ${todo.length} 个未签：\n\n${checkinLines(todo).join('\n')}`
           : `今日签到 ${done}/${cohort.length}，已全部签完 ✓`;
         if (todo.length) await tgSend(n.token, n.chatId, `⚡ <b>今日签到</b> · ${t}\n${body}`, CHECKIN_KB).catch(() => {});
         else await send(`⚡ <b>今日签到</b> · ${t}\n${body}`);
       } else if (text === '/expiring') {
-        const items = expiringList(data);
+        const items = expiringList(u);
         const body = items.length
           ? `共 ${items.length} 个服务临期：\n\n${expiringLines(items).join('\n')}`
           : '30 天内暂无临期服务';
@@ -1123,7 +1227,9 @@ async function pollBotCommands() {
       }
     }
     /* 写回前重读：这一分钟里用户可能改过数据，只合并轮询自己改的字段 */
-    writeJSON(DATA_FILE, mergePollWrites(loadData(), data, snap));
+    const fresh2 = loadData();
+    mergePollWrites(userData(fresh2, user.id), u, snap);
+    writeJSON(DATA_FILE, fresh2);
   } catch (e) { console.error('[!] TG 命令轮询异常:', e.message); }
 }
 setInterval(pollBotCommands, 60e3).unref();
@@ -1217,7 +1323,8 @@ function monthlyReportText(rep) {
   }
   return lines.join('\n');
 }
-/* 每月 1 号生成上月报告并推一次；没配通知渠道也照常生成存盘（只留最近 12 条），下次 1 号前不重复 */
+/* 每月 1 号生成上月报告并推一次；没配通知渠道也照常生成存盘（只留最近 12 条），下次 1 号前不重复；
+   v67：按用户各生成各的（各记各的 flags.lastMonthlyReport） */
 async function monthlyReportIfDue() {
   try {
     const data = loadData();
@@ -1225,19 +1332,25 @@ async function monthlyReportIfDue() {
     if (Number(t.split('-')[2]) !== 1) return;
     const [cy, cm] = t.split('-').map(Number);
     const prevYm = cm === 1 ? `${cy - 1}-12` : `${cy}-${String(cm - 1).padStart(2, '0')}`;
-    data.flags = data.flags || {};
-    if (data.flags.lastMonthlyReport === prevYm) return;
-    const rep = buildMonthlyReport(data, prevYm);
-    data.monthlyReports = (Array.isArray(data.monthlyReports) ? data.monthlyReports : []).filter((r) => r.ym !== prevYm);
-    data.monthlyReports.push(rep);
-    if (data.monthlyReports.length > 12) data.monthlyReports = data.monthlyReports.slice(-12);
-    data.flags.lastMonthlyReport = prevYm;
-    writeJSON(DATA_FILE, data);
-    const n = notifyCfg(data);
-    if ((n.token && n.chatId) || n.webhookUrl || n.barkKey || n.serverChanKey) {
-      await sendMultiChannel(n, `服务台月度报告 · ${prevYm}`, monthlyReportText(rep)).catch(() => {});
+    let changed = false;
+    for (const user of (data.users || [])) {
+      const u = userData(data, user.id);
+      ensureMeta(u);
+      u.flags = u.flags || {};
+      if (u.flags.lastMonthlyReport === prevYm) continue;
+      const rep = buildMonthlyReport(u, prevYm);
+      u.monthlyReports = (Array.isArray(u.monthlyReports) ? u.monthlyReports : []).filter((r) => r.ym !== prevYm);
+      u.monthlyReports.push(rep);
+      if (u.monthlyReports.length > 12) u.monthlyReports = u.monthlyReports.slice(-12);
+      u.flags.lastMonthlyReport = prevYm;
+      changed = true;
+      const n = notifyCfg(u);
+      if ((n.token && n.chatId) || n.webhookUrl || n.barkKey || n.serverChanKey) {
+        await sendMultiChannel(n, `服务台月度报告 · ${prevYm}`, monthlyReportText(rep)).catch(() => {});
+      }
+      console.log(`[monthly-report] ${user.username} 已生成 ${prevYm} 月度报告`);
     }
-    console.log(`[monthly-report] 已生成 ${prevYm} 月度报告`);
+    if (changed) writeJSON(DATA_FILE, data);
   } catch (e) { console.error('[!] 月度报告异常:', e.message); }
 }
 /* 到期自动归档——到期超 30 天没续的服务，分类改成“已归档”；
@@ -1258,17 +1371,24 @@ function archiveExpired(data, t) {
   data.archivedLog = (Array.isArray(data.archivedLog) ? data.archivedLog : []).concat(done).slice(-50);
   return done;
 }
-/* 每天跑一次（放在每小时的提醒检查里）；没配通知渠道也照常归档 */
+/* 每天跑一次（放在每小时的提醒检查里）；没配通知渠道也照常归档；
+   v67：按用户各跑各的（各记各的 flags.lastArchiveCheck） */
 function archiveExpiredIfDue() {
   try {
     const data = loadData();
     const t = todayStr();
-    data.flags = data.flags || {};
-    if (data.flags.lastArchiveCheck === t) return;
-    const done = archiveExpired(data, t);
-    data.flags.lastArchiveCheck = t;
-    writeJSON(DATA_FILE, data);
-    if (done.length) console.log(`[archive] 自动归档 ${done.length} 个过期服务`);
+    let changed = false;
+    for (const user of (data.users || [])) {
+      const u = userData(data, user.id);
+      ensureMeta(u);
+      u.flags = u.flags || {};
+      if (u.flags.lastArchiveCheck === t) continue;
+      const done = archiveExpired(u, t);
+      u.flags.lastArchiveCheck = t;
+      changed = true;
+      if (done.length) console.log(`[archive] ${user.username} 自动归档 ${done.length} 个过期服务`);
+    }
+    if (changed) writeJSON(DATA_FILE, data);
   } catch (e) { console.error('[!] 自动归档异常:', e.message); }
 }
 /* SSL 证书到期——对 https 的站取证书到期日（10 秒超时，失败就跳过，不影响死链检测） */
@@ -1292,18 +1412,34 @@ function getCertExpiry(hostname) {
   });
 }
 
+/* v67：死链检测按用户跑——各用户的服务各探各的，合并结果一起返回 */
 async function checkLinks() {
   try {
     const data = loadData();
+    const total = { total: 0, dead: 0, ok: 0, unknown: 0, certs: 0, changed: false };
+    for (const user of (data.users || [])) {
+      const u = userData(data, user.id);
+      ensureMeta(u);
+      const r = await checkLinksForUser(user, u);
+      if (!r) continue;
+      total.total += r.total; total.dead += r.dead; total.ok += r.ok;
+      total.unknown += r.unknown; total.certs += r.certs;
+      if (r.changed) total.changed = true;
+    }
+    return total;
+  } catch (e) { console.error('[!] 链接检测异常:', e.message); return null; }
+}
+async function checkLinksForUser(user, u) {
+  try {
     const t = todayStr();
     const now = Date.now();
-    const results = await Promise.all(data.services.map(async (s) => {
+    const results = await Promise.all((u.services || []).map(async (s) => {
       const st = await probeLink(s.url);
       /* v65：https 的站顺手取证书到期日（失败就跳过，不影响死链结论） */
       let cert = null;
-      const u = normLinkUrl(s.url);
-      if (u.startsWith('https://')) {
-        try { cert = await getCertExpiry(new URL(u).hostname); } catch { cert = null; }
+      const url = normLinkUrl(s.url);
+      if (url.startsWith('https://')) {
+        try { cert = await getCertExpiry(new URL(url).hostname); } catch { cert = null; }
       }
       return { id: s.id, st, cert };
     }));
@@ -1311,9 +1447,10 @@ async function checkLinks() {
        绝不把探活开始时的整盘快照写回去盖掉别人的改动（删掉的服务跳过）；
        v59：每次探活都记一笔（ok=通，dead=不通，unknown 不记——结论不明不算），只留最近 120 条（约 30 天） */
     const fresh = loadData();
+    const fu = userData(fresh, user.id);
     let changed = false;
     for (const { id, st, cert } of results) {
-      const s = fresh.services.find((x) => x.id === id);
+      const s = fu.services.find((x) => x.id === id);
       if (!s) continue;
       if (s.linkStatus !== st) { s.linkStatus = st; s.linkCheckedAt = t; changed = true; }
       if (st === 'ok' || st === 'dead') {
@@ -1367,21 +1504,26 @@ async function runAutoSignins() {
   try {
     const data = loadData();
     const t = todayStr();
-    const due = checkinCohort(data, t);
     const results = [];
     let changed = false;
-    for (const svc of due) {
-      const cfg = autoSigninOf(svc);
-      if (!cfg) continue;
-      if (serviceDoneToday(svc, t)) continue; // 今天已经签过了，不重复发
-      const r = await tryAutoSignin(svc, cfg);
-      svc.autoSigninLast = { at: cstDateTime(), ok: r.ok, status: r.status, note: r.note || '' };
-      changed = true;
-      if (r.ok) {
-        doCheckin(data, svc, t);
-        results.push({ id: svc.id, name: svc.name, ok: true });
-      } else {
-        results.push({ id: svc.id, name: svc.name, ok: false, note: r.note });
+    /* v67：自动签到按用户跑——各用户的服务各签各的 */
+    for (const user of (data.users || [])) {
+      const u = userData(data, user.id);
+      ensureMeta(u);
+      const due = checkinCohort(u, t);
+      for (const svc of due) {
+        const cfg = autoSigninOf(svc);
+        if (!cfg) continue;
+        if (serviceDoneToday(svc, t)) continue; // 今天已经签过了，不重复发
+        const r = await tryAutoSignin(svc, cfg);
+        svc.autoSigninLast = { at: cstDateTime(), ok: r.ok, status: r.status, note: r.note || '' };
+        changed = true;
+        if (r.ok) {
+          doCheckin(u, svc, t);
+          results.push({ id: svc.id, name: svc.name, ok: true });
+        } else {
+          results.push({ id: svc.id, name: svc.name, ok: false, note: r.note });
+        }
       }
     }
     if (changed) writeJSON(DATA_FILE, data);
@@ -1394,21 +1536,41 @@ setTimeout(() => { runAutoSignins(); }, 60e3).unref(); // 启动 1 分钟后先�
 
 /* ---------- v60：GitHub 自动备份——每天把去掉敏感字段的数据推到一个私有仓库的单个文件里
    （hubmate-backup.json），Git 历史就是备份历史；数据没变就不推，免得刷屏 ---------- */
-function strippedBackupData(data) {
-  const out = { ...data };
-  delete out.passwordHash;
-  delete out.apiToken;
-  delete out.totpSecret;
-  delete out.syncToken;
-  out.services = (data.services || []).map((s) => {
+/* v67：单个用户的业务数据脱敏——API 令牌、二次验证密钥、通知渠道的密钥、自动签到请求头都不带出去 */
+function strippedUserData(u) {
+  const cu = { ...(u || {}) };
+  delete cu.apiToken;
+  delete cu.totpSecret;
+  cu.services = (u.services || []).map((s) => {
     if (!s.autoSignin) return s;
     return { ...s, autoSignin: { ...s.autoSignin, headers: {} } };
   });
-  out.notify = { ...(data.notify || {}) };
-  delete out.notify.token;
-  delete out.notify.webhookUrl;
-  delete out.notify.barkKey;
-  delete out.notify.serverChanKey;
+  cu.notify = { ...(u.notify || {}) };
+  delete cu.notify.token;
+  delete cu.notify.webhookUrl;
+  delete cu.notify.barkKey;
+  delete cu.notify.serverChanKey;
+  return cu;
+}
+/* v67：整盘备份脱敏——所有用户的密码哈希都不带（恢复时用户账号不动），
+   每位用户的业务数据各脱各的敏；GitHub 备份和手动下载都走这里 */
+function strippedBackupData(data) {
+  const out = { ...data };
+  delete out.syncToken;
+  /* 旧结构残留的顶层敏感字段（以防万一）也清掉 */
+  delete out.passwordHash;
+  delete out.apiToken;
+  delete out.totpSecret;
+  delete out.services;
+  delete out.notify;
+  out.users = (Array.isArray(data.users) ? data.users : []).map((x) => {
+    const { passwordHash, ...rest } = x || {};
+    return rest;
+  });
+  out.userData = {};
+  for (const [uid, u] of Object.entries(data.userData || {})) {
+    out.userData[uid] = strippedUserData(u);
+  }
   out.githubBackup = { ...(data.githubBackup || {}) };
   delete out.githubBackup.token;
   return out;
@@ -1503,7 +1665,8 @@ async function syncWithPeers() {
           const pullRes = await fetch(`${base}/api/sync/pull?token=${encodeURIComponent(tok)}`, { signal: AbortSignal.timeout(30000) });
           if (!pullRes.ok) continue;
           const imp = await pullRes.json();
-          if (!imp || !imp.data || !Array.isArray(imp.data.services)) continue;
+          /* v67：同步的是整盘新结构（users + userData），旧结构不认 */
+          if (!imp || !imp.data || !Array.isArray(imp.data.users)) continue;
           const stamp = new Date().toISOString().replace(/[:.]/g, '-');
           try {
             fs.writeFileSync(path.join(DATA_DIR, `sync-before-import-${stamp}.json`), JSON.stringify(data, null, 2));
@@ -1565,6 +1728,77 @@ function ledgerMarkdown(data) {
   return md + '\n';
 }
 
+/* ---------- v67：备份恢复（按用户归属）——把一份用户业务数据（新格式的 userData 条目，
+   或旧格式的整盘顶层对象）恢复进指定用户；用户账号（users/inviteCodes）永远不动；
+   通知渠道的密钥永远沿用当前值，不被备份盖掉 */
+function restoreUserData(data, userId, imp) {
+  const u = userData(data, userId);
+  ensureMeta(u);
+  const cats = Array.isArray(imp.categories) && imp.categories.length
+    ? imp.categories.filter((c) => c && typeof c.id === 'string' && typeof c.label === 'string' && c.label.trim())
+    : categoriesOf(u);
+  const catIds = new Set(cats.map((c) => c.id));
+  const seen = new Set();
+  u.services = imp.services.filter((s) => { if (seen.has(String(s.id))) return false; seen.add(String(s.id)); return true; }).map((s) => ({
+    id: String(s.id),
+    name: String(s.name).slice(0, 100),
+    category: catIds.has(s.category) ? s.category : 'relay',
+    url: String(s.url || '').slice(0, 500),
+    account: String(s.account || '').slice(0, 500),
+    secret: String(s.secret || '').slice(0, 500),
+    price: String(s.price || '').slice(0, 500),
+    notes: String(s.notes || '').slice(0, 500),
+    registeredAt: String(s.registeredAt || ''),
+    expiresAt: String(s.expiresAt || ''),
+    checkinFrequency: s.checkinFrequency === 'daily' ? 'daily' : 'none',
+    checkinEveryDays: clampInt(s.checkinEveryDays, 1, 365, 1),
+    renewDays: clampInt(s.renewDays, 1, 3650, 365),
+    favorite: !!s.favorite,
+    abnormal: !!s.abnormal,
+    accounts: (Array.isArray(s.accounts) ? s.accounts : []).map(sanitizeAccount).filter(Boolean).slice(0, 20),
+    checkins: Array.isArray(s.checkins) ? s.checkins.filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)) : [],
+    visits: Number(s.visits) || 0,
+    sortOrder: Number(s.sortOrder) || 0,
+    linkStatus: s.linkStatus,
+    linkHistory: (Array.isArray(s.linkHistory) ? s.linkHistory : []).filter((h) => h && typeof h.t === 'number' && typeof h.ok === 'boolean').slice(-120),
+    renewHistory: (Array.isArray(s.renewHistory) ? s.renewHistory : []).filter((h) => h && /^\d{4}-\d{2}-\d{2}$/.test(h.at || '') && typeof h.from === 'string' && typeof h.to === 'string').slice(-20),
+    tags: (Array.isArray(s.tags) ? s.tags : []).map((t) => String(t).trim().slice(0, 20)).filter(Boolean).slice(0, 10),
+    customFields: sanitizeCustomFields(s.customFields),
+    autoSignin: sanitizeAutoSignin(s.autoSignin),
+    autoSigninLast: (s.autoSigninLast && typeof s.autoSigninLast === 'object') ? { at: String(s.autoSigninLast.at || '').slice(0, 30), ok: !!s.autoSigninLast.ok, status: Number(s.autoSigninLast.status) || 0, note: String(s.autoSigninLast.note || '').slice(0, 200) } : undefined,
+    /* v65：证书到期日、建站日期也随备份恢复 */
+    certExpiresAt: /^\d{4}-\d{2}-\d{2}$/.test(s.certExpiresAt || '') ? s.certExpiresAt : undefined,
+    certCheckedAt: /^\d{4}-\d{2}-\d{2}$/.test(s.certCheckedAt || '') ? s.certCheckedAt : undefined,
+    createdAt: /^\d{4}-\d{2}-\d{2}$/.test(s.createdAt || '') ? s.createdAt : undefined
+  }));
+  /* v65：先恢复共享账号库，再归一化账号——链接账号要按库解析（库里没有就退回成本地副本） */
+  if (Array.isArray(imp.sharedAccounts)) {
+    u.sharedAccounts = imp.sharedAccounts.map(sanitizeVaultAccount).filter(Boolean).slice(0, 200);
+  }
+  /* v62：恢复后归一化账号——默认账号的镜像（account/secret）跟恢复回来的 accounts 走，
+     不然旧备份里只有镜像、没有 accounts 数组的服务会丢账号 */
+  u.services.forEach((s) => normalizeAccounts(s, vaultOf(u)));
+  u.categories = cats.map((c) => ({ id: c.id, label: String(c.label).slice(0, 20), icon: cleanIcon(c.icon), cls: c.cls || 't-custom' }));
+  if (imp.history && typeof imp.history === 'object') u.history = imp.history;
+  if (imp.achievements && typeof imp.achievements === 'object') u.achievements = imp.achievements;
+  if (Number(imp.xp) >= 0) u.xp = Number(imp.xp);
+  if (imp.flags && typeof imp.flags === 'object') u.flags = imp.flags;
+  /* v65：月度报告、登录历史、归档日志也随备份恢复（都是用户自己的数据，不含密钥） */
+  if (Array.isArray(imp.monthlyReports)) u.monthlyReports = imp.monthlyReports.filter((r) => r && typeof r.ym === 'string').slice(-12);
+  if (Array.isArray(imp.loginHistory)) u.loginHistory = imp.loginHistory.filter((h) => h && typeof h.at === 'string').slice(-50);
+  if (Array.isArray(imp.archivedLog)) u.archivedLog = imp.archivedLog.filter((a) => a && typeof a.at === 'string').slice(-50);
+  if (imp.notify && typeof imp.notify === 'object') {
+    const n = notifyCfg(u);
+    /* v62：Token、Webhook 地址、Bark Key、Server酱 Key 永远沿用当前值，不被备份盖掉 */
+    const keep = { token: n.token, webhookUrl: n.webhookUrl, barkKey: n.barkKey, serverChanKey: n.serverChanKey };
+    Object.assign(n, imp.notify);
+    for (const k of ['token', 'webhookUrl', 'barkKey', 'serverChanKey']) {
+      if (keep[k]) n[k] = keep[k]; else delete n[k];
+    }
+  }
+  return u.services.length;
+}
+
 /* ---------- API ---------- */
 async function handleAPI(req, res, pathname) {
   const send = (status, obj, headers) => sendJSON(req, res, status, obj, headers);
@@ -1590,42 +1824,80 @@ async function handleAPI(req, res, pathname) {
       return send(400, { error: '验证码不对或已过期，请重新输入' });
     }
     const data = loadData();
-    if (body.username !== data.username || !verifyPassword(body.password, data.passwordHash)) {
+    const user = findUserByName(data, body.username);
+    /* v67：先验密码再查封禁——不让没密码的人探出账号存不存在、封没封禁 */
+    if (!user || !verifyPassword(body.password, user.passwordHash)) {
       return send(401, { error: '用户名或密码不对' });
     }
+    if (user.banned) return send(403, { error: '账号已被封禁，请联系管理员' });
+    const u = userData(data, user.id);
+    ensureMeta(u);
     /* v60：开了二次验证的，密码对了还要验 6 位动态码；没填就告诉前端要填（密码已验过才到这一步） */
-    if (data.totpEnabled && data.totpSecret) {
+    if (u.totpEnabled && u.totpSecret) {
       if (!body.totp) return send(401, { error: 'need_totp' });
-      if (!verifyTotp(data.totpSecret, body.totp)) return send(401, { error: '二次验证失败' });
+      if (!verifyTotp(u.totpSecret, body.totp)) return send(401, { error: '二次验证失败' });
     }
     const token = crypto.randomBytes(32).toString('hex');
     const sessions = loadSessions();
-    sessions[token] = { created: Date.now() };
+    sessions[token] = { created: Date.now(), userId: user.id };
     saveSessions(sessions);
     /* v65：登录历史——每次成功登录记一条（时间、IP、UA），只留最近 50 条；
        本次 IP 和上次不同、且配了 Telegram 时发一次异地登录提醒（不拦登录，提醒失败也不报错） */
-    const prevLogin = (Array.isArray(data.loginHistory) ? data.loginHistory : []).slice(-1)[0];
-    data.loginHistory = (Array.isArray(data.loginHistory) ? data.loginHistory : []).concat([{ at: cstDateTime(), ip, ua: String(req.headers['user-agent'] || '').slice(0, 300) }]).slice(-50);
+    const prevLogin = (Array.isArray(u.loginHistory) ? u.loginHistory : []).slice(-1)[0];
+    u.loginHistory = (Array.isArray(u.loginHistory) ? u.loginHistory : []).concat([{ at: cstDateTime(), ip, ua: String(req.headers['user-agent'] || '').slice(0, 300) }]).slice(-50);
+    user.lastLoginAt = cstDateTime();
     writeJSON(DATA_FILE, data);
     if (prevLogin && prevLogin.ip && prevLogin.ip !== ip) {
-      const n = notifyCfg(data);
+      const n = notifyCfg(u);
       if (n.token && n.chatId) {
         tgSend(n.token, n.chatId, `🔐 <b>服务台异地登录提醒</b>\n你的账号在新 IP ${escHtml(ip)} 登录（${cstDateTime()}）。\n如果不是你本人，请立即改密码。`).catch(() => {});
       }
     }
     /* 反代 + HTTPS 时给 Cookie 加 Secure */
     const secure = TRUST_PROXY && String(req.headers['x-forwarded-proto'] || '').includes('https');
-    return send(200, { ok: true, username: data.username }, {
+    return send(200, { ok: true, username: user.username, isAdmin: !!user.isAdmin }, {
       'Set-Cookie': `session=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${SESSION_MS / 1000}${secure ? '; Secure' : ''}`
     });
   }
 
+  /* v67：注册——必须凭邀请码（第一个默认用户除外，他建站时就有了）；
+     邀请码一次用完，注册成功即消耗；用户名全站唯一 */
+  if (pathname === '/api/register' && req.method === 'POST') {
+    const ip = clientIp(req);
+    if (loginThrottled(ip)) {
+      return send(429, { error: '尝试太频繁，请 10 分钟后再试' });
+    }
+    const body = await jsonBody(req);
+    const username = String(body.username || '').trim();
+    const password = String(body.password || '');
+    const code = String(body.inviteCode || '').trim().toUpperCase();
+    if (!username || username.length > 20 || /\s/.test(username)) return send(400, { error: '用户名填 1–20 个字符，不能含空格' });
+    if (!password || password.length < 6) return send(400, { error: '密码至少 6 位' });
+    if (!code) return send(400, { error: '邀请码必填，没有就找管理员要一个' });
+    const data = loadData();
+    if (findUserByName(data, username)) return send(400, { error: '这个用户名已经被注册了' });
+    const inv = (data.inviteCodes || []).find((c) => c && String(c.code || '').toUpperCase() === code);
+    if (!inv) return send(400, { error: '邀请码不对' });
+    if (inv.usedBy) return send(400, { error: '这个邀请码已经被用过了' });
+    const user = { id: crypto.randomBytes(12).toString('hex'), username, passwordHash: hashPassword(password), passwordIsDefault: false, isAdmin: false, banned: false, createdAt: cstDateTime(), lastLoginAt: '' };
+    data.users.push(user);
+    userData(data, user.id); // 建一份空的业务数据
+    inv.usedBy = username;
+    inv.usedAt = cstDateTime();
+    writeJSON(DATA_FILE, data);
+    return send(200, { ok: true, username });
+  }
+
   if (pathname === '/api/public' && req.method === 'GET') {
     const data = loadData();
-    const unlocked = syncAchievements(data);
+    /* v67：公开落地页只显示第一个默认用户（管理员）的公开服务，和以前一样 */
+    const admin = adminUser(data);
+    const u = admin ? userData(data, admin.id) : defaultUserData();
+    ensureMeta(u);
+    const unlocked = syncAchievements(u);
     if (unlocked.length) writeJSON(DATA_FILE, data);
-    const payload = metaPayload(data);
-    payload.services = publicServices(data);
+    const payload = metaPayload(admin || { username: 'jason', passwordIsDefault: false, isAdmin: true }, u);
+    payload.services = publicServices(u);
     return send(200, payload);
   }
 
@@ -1634,10 +1906,13 @@ async function handleAPI(req, res, pathname) {
      日历下次抓取会自动更新（UID 是服务 id，稳定不变） */
   if (pathname === '/api/calendar.ics' && req.method === 'GET') {
     const data = loadData();
+    /* v67：日历订阅只含第一个默认用户（管理员）的服务 */
+    const admin = adminUser(data);
+    const u = admin ? userData(data, admin.id) : defaultUserData();
     const escICS = (s) => String(s || '').replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
     const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
     const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//HubMate//Expiry Calendar//EN', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH', 'X-WR-CALNAME:HubMate 服务到期日'];
-    for (const s of data.services) {
+    for (const s of u.services) {
       if (!s.expiresAt || !/^\d{4}-\d{2}-\d{2}$/.test(s.expiresAt)) continue;
       lines.push('BEGIN:VEVENT');
       lines.push('UID:' + s.id + '@hubmate');
@@ -1661,7 +1936,9 @@ async function handleAPI(req, res, pathname) {
   if (pathname === '/api/sync/status' && req.method === 'GET') {
     if (!syncTokenOk(req, null)) return send(401, { error: '同步口令不对' });
     const data = loadData();
-    return send(200, { ok: true, mtime: dataMtime(), hash: dataHash(data), services: data.services.length });
+    /* v67：服务总数按所有用户加起来算 */
+    const totalServices = Object.values(data.userData || {}).reduce((n, u) => n + ((u && u.services) || []).length, 0);
+    return send(200, { ok: true, mtime: dataMtime(), hash: dataHash(data), services: totalServices });
   }
   if (pathname === '/api/sync/pull' && req.method === 'GET') {
     if (!syncTokenOk(req, null)) return send(401, { error: '同步口令不对' });
@@ -1671,7 +1948,8 @@ async function handleAPI(req, res, pathname) {
   if (pathname === '/api/sync/push' && req.method === 'POST') {
     const body = await jsonBody(req);
     if (!syncTokenOk(req, body)) return send(401, { error: '同步口令不对' });
-    if (!body.data || !Array.isArray(body.data.services)) return send(400, { error: '同步数据不对' });
+    /* v67：同步的是整盘新结构（users + userData），旧结构不认 */
+    if (!body.data || !Array.isArray(body.data.users)) return send(400, { error: '同步数据不对' });
     const data = loadData();
     const localMtime = dataMtime();
     const localHash = dataHash(data);
@@ -1694,19 +1972,25 @@ async function handleAPI(req, res, pathname) {
   /* ---------- v62：浏览器扩展按域名取账号——登录会话或 API 令牌都认；
      只返回和这个域名匹配的服务的账号（精确域名或子域名），别的服务一律不返回 */
   if (pathname === '/api/accounts/by-domain' && req.method === 'GET') {
-    if (!currentUser(req) && !isApiToken(req)) return send(401, { error: '未登录' });
+    const cu = currentUser(req);
+    const tu = !cu ? isApiToken(req) : null;
+    if (!cu && !tu) return send(401, { error: '未登录' });
     const raw = new URL(req.url, 'http://x').searchParams.get('domain') || '';
     const dom = raw.trim().toLowerCase().replace(/^www\./, '').replace(/:\d+$/, '');
     if (!dom || !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(dom)) return send(400, { error: '域名不对' });
     const data = loadData();
+    /* v67：只返回当前登录用户自己的服务里的账号 */
+    const me0 = findUser(data, cu ? cu.userId : tu);
+    if (!me0 || me0.banned) return send(401, { error: '未登录' });
+    const u = userData(data, me0.id);
     const out = [];
-    for (const s of data.services) {
+    for (const s of u.services) {
       let host = '';
       try { host = new URL(/^https?:\/\//i.test(s.url || '') ? s.url : 'https://' + (s.url || '')).hostname.toLowerCase().replace(/^www\./, ''); } catch { continue; }
       if (!host || !(host === dom || host.endsWith('.' + dom))) continue;
       for (const a of serviceAccounts(s)) {
         /* v65：链接账号返回库里的用户名/密码（以库为准） */
-        const acc = resolveVaultAccount(vaultOf(data), a) || a;
+        const acc = resolveVaultAccount(vaultOf(u), a) || a;
         out.push({ serviceId: s.id, serviceName: s.name, label: a.label || '', username: acc.username || '', password: acc.password || '', url: s.url || '' });
       }
       if (out.length >= 20) break;
@@ -1715,29 +1999,170 @@ async function handleAPI(req, res, pathname) {
   }
 
   const auth = currentUser(req);
-  /* v59：API 令牌只放行签到接口（没登录也能用令牌签到），别的接口仍要登录 */
-  const tokenAllowed = !auth && isApiToken(req) && isTokenAllowedEndpoint(pathname, req.method);
+  /* v59：API 令牌只放行签到接口（没登录也能用令牌签到），别的接口仍要登录；
+     v67：令牌属于哪个用户，签到就签谁的服务 */
+  const apiUserId = !auth ? isApiToken(req) : null;
+  const tokenAllowed = !!apiUserId && isTokenAllowedEndpoint(pathname, req.method);
   if (!auth && !tokenAllowed) return send(401, { error: '未登录' });
+  const meId = auth ? auth.userId : apiUserId;
+  /* v67：封禁的用户（会话或 API 令牌）一律拒绝 */
+  {
+    const chk = findUser(loadData(), meId);
+    if (!chk) return send(401, { error: '未登录' });
+    if (chk.banned) return send(403, { error: '账号已被封禁，请联系管理员' });
+  }
+
+  /* v67：改自己的用户名——要输当前密码确认，全站唯一；改名后邀请码里的 usedBy 跟着改 */
+  if (pathname === '/api/account/rename' && req.method === 'POST') {
+    const body = await jsonBody(req);
+    const data = loadData();
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
+    const newName = String(body.username || '').trim();
+    if (!newName || newName.length > 20 || /\s/.test(newName)) return send(400, { error: '用户名填 1–20 个字符，不能含空格' });
+    if (!verifyPassword(body.password, me.passwordHash)) return send(401, { error: '密码不对' });
+    const dup = findUserByName(data, newName);
+    if (dup && dup.id !== me.id) return send(400, { error: '这个用户名已经被注册了' });
+    if (dup && dup.id === me.id) return send(200, { ok: true, username: me.username });
+    const old = me.username;
+    me.username = newName;
+    for (const c of (data.inviteCodes || [])) if (c.usedBy === old) c.usedBy = newName;
+    writeJSON(DATA_FILE, data);
+    return send(200, { ok: true, username: newName });
+  }
+
+  /* ---------- v67：用户管理 + 邀请码——只有第一个默认用户（管理员）能用 ----------
+     管理员能看/建/改名/重置密码/封禁/删用户，但看不到也改不了任何用户的服务、笔记、
+     账号等业务数据；用户管理接口只返回账号信息 */
+  const requireAdmin = () => {
+    const data = loadData();
+    const me = findUser(data, meId);
+    if (!me || !me.isAdmin) return null;
+    return { data, me };
+  };
+  if (pathname === '/api/admin/users' && req.method === 'GET') {
+    const a = requireAdmin();
+    if (!a) return send(403, { error: '只有管理员能用这个功能' });
+    return send(200, { ok: true, users: (a.data.users || []).map((x) => publicUser(a.data, x)) });
+  }
+  if (pathname === '/api/admin/users' && req.method === 'POST') {
+    const a = requireAdmin();
+    if (!a) return send(403, { error: '只有管理员能用这个功能' });
+    const body = await jsonBody(req);
+    const username = String(body.username || '').trim();
+    const password = String(body.password || '');
+    if (!username || username.length > 20 || /\s/.test(username)) return send(400, { error: '用户名填 1–20 个字符，不能含空格' });
+    if (!password || password.length < 6) return send(400, { error: '密码至少 6 位' });
+    if (findUserByName(a.data, username)) return send(400, { error: '这个用户名已经被注册了' });
+    const user = { id: crypto.randomBytes(12).toString('hex'), username, passwordHash: hashPassword(password), passwordIsDefault: true, isAdmin: false, banned: false, createdAt: cstDateTime(), lastLoginAt: '' };
+    a.data.users.push(user);
+    userData(a.data, user.id);
+    writeJSON(DATA_FILE, a.data);
+    return send(200, { ok: true, user: publicUser(a.data, user) });
+  }
+  const au = pathname.match(/^\/api\/admin\/users\/([0-9a-f]+)(\/(reset-password|ban))?$/);
+  if (au && (req.method === 'PUT' || req.method === 'POST' || req.method === 'DELETE')) {
+    const a = requireAdmin();
+    if (!a) return send(403, { error: '只有管理员能用这个功能' });
+    const target = findUser(a.data, au[1]);
+    if (!target) return send(404, { error: '找不到该用户' });
+    if (req.method === 'PUT' && !au[2]) {
+      /* 改别人的用户名 */
+      const body = await jsonBody(req);
+      const newName = String(body.username || '').trim();
+      if (!newName || newName.length > 20 || /\s/.test(newName)) return send(400, { error: '用户名填 1–20 个字符，不能含空格' });
+      const dup = findUserByName(a.data, newName);
+      if (dup && dup.id !== target.id) return send(400, { error: '这个用户名已经被注册了' });
+      const old = target.username;
+      target.username = newName;
+      for (const c of (a.data.inviteCodes || [])) if (c.usedBy === old) c.usedBy = newName;
+      writeJSON(DATA_FILE, a.data);
+      return send(200, { ok: true, user: publicUser(a.data, target) });
+    }
+    if (req.method === 'POST' && au[2] === '/reset-password') {
+      /* 重置密码：管理员填了就用填的，没填就随机生成一个并只返回这一次；
+         重置后该用户是默认密码状态，下次登录会提示改密码 */
+      const body = await jsonBody(req);
+      let pw = String(body.password || '');
+      if (pw && pw.length < 6) return send(400, { error: '密码至少 6 位' });
+      if (!pw) {
+        const abc = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+        pw = '';
+        for (let i = 0; i < 12; i++) pw += abc[crypto.randomInt(abc.length)];
+      }
+      target.passwordHash = hashPassword(pw);
+      target.passwordIsDefault = true;
+      writeJSON(DATA_FILE, a.data);
+      return send(200, { ok: true, password: pw });
+    }
+    if (req.method === 'POST' && au[2] === '/ban') {
+      const body = await jsonBody(req);
+      if (target.id === a.me.id) return send(400, { error: '不能封禁自己' });
+      if (target.isAdmin) return send(400, { error: '不能封禁管理员' });
+      target.banned = !!body.banned;
+      writeJSON(DATA_FILE, a.data);
+      return send(200, { ok: true, user: publicUser(a.data, target) });
+    }
+    if (req.method === 'DELETE' && !au[2]) {
+      if (target.id === a.me.id) return send(400, { error: '不能删除自己' });
+      if (target.isAdmin) return send(400, { error: '不能删除管理员' });
+      a.data.users = a.data.users.filter((x) => x.id !== target.id);
+      if (a.data.userData) delete a.data.userData[target.id];
+      writeJSON(DATA_FILE, a.data);
+      return send(200, { ok: true });
+    }
+  }
+  if (pathname === '/api/admin/invite-codes' && req.method === 'GET') {
+    const a = requireAdmin();
+    if (!a) return send(403, { error: '只有管理员能用这个功能' });
+    const list = (a.data.inviteCodes || []).slice().sort((x, y) => String(y.createdAt || '').localeCompare(String(x.createdAt || '')));
+    return send(200, { ok: true, codes: list });
+  }
+  if (pathname === '/api/admin/invite-codes' && req.method === 'POST') {
+    const a = requireAdmin();
+    if (!a) return send(403, { error: '只有管理员能用这个功能' });
+    const used = new Set((a.data.inviteCodes || []).map((c) => c.code));
+    let code = '';
+    do { code = makeInviteCode(); } while (used.has(code));
+    const inv = { code, createdAt: cstDateTime(), usedBy: null, usedAt: '' };
+    a.data.inviteCodes = a.data.inviteCodes || [];
+    a.data.inviteCodes.push(inv);
+    writeJSON(DATA_FILE, a.data);
+    return send(200, { ok: true, code: inv });
+  }
+  const ic = pathname.match(/^\/api\/admin\/invite-codes\/(HUB-[A-Za-z0-9-]+)$/);
+  if (ic && req.method === 'DELETE') {
+    const a = requireAdmin();
+    if (!a) return send(403, { error: '只有管理员能用这个功能' });
+    const idx = (a.data.inviteCodes || []).findIndex((c) => c.code === ic[1]);
+    if (idx < 0) return send(404, { error: '找不到这个邀请码' });
+    if (a.data.inviteCodes[idx].usedBy) return send(400, { error: '已使用过的邀请码不用作废' });
+    a.data.inviteCodes.splice(idx, 1);
+    writeJSON(DATA_FILE, a.data);
+    return send(200, { ok: true });
+  }
 
   /* v59：API 令牌管理——生成/作废都要登录；令牌只在生成那一刻返回一次，平时只告诉你有没有 */
   if (pathname === '/api/api-token/status' && req.method === 'GET') {
     const data = loadData();
-    return send(200, { hasToken: !!data.apiToken });
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
+    return send(200, { hasToken: !!u.apiToken });
   }
   /* v65：共享账号库——账号只存一份；服务账号带 sharedId 就是链接它（以库为准）；
      库里改密码，所有链接跟着变；库里删账号，链接的服务账号自动变回本地副本。
      密码只在登录后返回（和服务账号同口径），公开接口里永远没有库里的密码 */
   if (pathname === '/api/vault' && req.method === 'GET') {
     const data = loadData();
-    const vault = vaultOf(data);
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
+    const vault = vaultOf(u);
     const counts = {};
-    for (const s of data.services) for (const a of serviceAccounts(s)) if (a.sharedId) counts[a.sharedId] = (counts[a.sharedId] || 0) + 1;
+    for (const s of u.services) for (const a of serviceAccounts(s)) if (a.sharedId) counts[a.sharedId] = (counts[a.sharedId] || 0) + 1;
     return send(200, { ok: true, accounts: vault.map((v) => ({ ...v, linked: counts[v.id] || 0 })) });
   }
   if (pathname === '/api/vault' && req.method === 'POST') {
     const body = await jsonBody(req);
     const data = loadData();
-    const vault = vaultOf(data);
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
+    const vault = vaultOf(u);
     const v = sanitizeVaultAccount(body);
     if (!v || !v.username) return send(400, { error: '账号不能为空' });
     v.id = crypto.randomBytes(6).toString('hex');
@@ -1750,7 +2175,8 @@ async function handleAPI(req, res, pathname) {
   if (vm && req.method === 'PUT') {
     const body = await jsonBody(req);
     const data = loadData();
-    const vault = vaultOf(data);
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
+    const vault = vaultOf(u);
     const v = vault.find((x) => x.id === vm[1]);
     if (!v) return send(404, { error: '找不到该账号' });
     const next = sanitizeVaultAccount({ ...v, ...body, id: v.id });
@@ -1760,7 +2186,7 @@ async function handleAPI(req, res, pathname) {
     else if (v.passwordChangedAt) next.passwordChangedAt = v.passwordChangedAt;
     Object.assign(v, next);
     /* 库里改了，所有链接它的服务账号快照跟着同步（读时也以库为准，这里是双保险） */
-    for (const s of data.services) {
+    for (const s of u.services) {
       for (const a of serviceAccounts(s)) {
         if (a.sharedId === v.id) { a.username = v.username; a.password = v.password; if (v.passwordChangedAt) a.passwordChangedAt = v.passwordChangedAt; }
       }
@@ -1771,12 +2197,13 @@ async function handleAPI(req, res, pathname) {
   }
   if (vm && req.method === 'DELETE') {
     const data = loadData();
-    const vault = vaultOf(data);
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
+    const vault = vaultOf(u);
     const idx = vault.findIndex((x) => x.id === vm[1]);
     if (idx < 0) return send(404, { error: '找不到该账号' });
     const v = vault[idx];
     /* 删库账号：链接它的服务账号变回本地副本（快照就是库里的账号密码，不丢数据） */
-    for (const s of data.services) {
+    for (const s of u.services) {
       for (const a of serviceAccounts(s)) {
         if (a.sharedId === v.id) { delete a.sharedId; a.username = v.username; a.password = v.password; if (v.passwordChangedAt) a.passwordChangedAt = v.passwordChangedAt; }
       }
@@ -1789,53 +2216,60 @@ async function handleAPI(req, res, pathname) {
   /* v65：最近登录——列出最近 10 条登录记录（时间、IP、UA 原文，设备由前端按 UA 粗取） */
   if (pathname === '/api/login-history' && req.method === 'GET') {
     const data = loadData();
-    const list = (Array.isArray(data.loginHistory) ? data.loginHistory : []).slice(-10).reverse();
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
+    const list = (Array.isArray(u.loginHistory) ? u.loginHistory : []).slice(-10).reverse();
     return send(200, { ok: true, logins: list });
   }
   /* v65：月度报告——存在 monthlyReports 里（每月一条，只留最近 12 条）；
      每月 1 号自动生成上月报告并推 Telegram；这里可以手动生成/查看最近 6 条 */
   if (pathname === '/api/monthly-reports' && req.method === 'GET') {
     const data = loadData();
-    const list = (Array.isArray(data.monthlyReports) ? data.monthlyReports : []).slice().sort((a, b) => String(b.ym).localeCompare(String(a.ym))).slice(0, 6);
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
+    const list = (Array.isArray(u.monthlyReports) ? u.monthlyReports : []).slice().sort((a, b) => String(b.ym).localeCompare(String(a.ym))).slice(0, 6);
     return send(200, { ok: true, reports: list });
   }
   if (pathname === '/api/monthly-report/generate' && req.method === 'POST') {
     const body = await jsonBody(req);
     const data = loadData();
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
     let ym = String(body.ym || '').trim();
     if (!/^\d{4}-\d{2}$/.test(ym)) {
       const t = todayStr();
       const [cy, cm] = t.split('-').map(Number);
       ym = cm === 1 ? `${cy - 1}-12` : `${cy}-${String(cm - 1).padStart(2, '0')}`;
     }
-    const rep = buildMonthlyReport(data, ym);
-    data.monthlyReports = (Array.isArray(data.monthlyReports) ? data.monthlyReports : []).filter((r) => r.ym !== ym);
-    data.monthlyReports.push(rep);
-    if (data.monthlyReports.length > 12) data.monthlyReports = data.monthlyReports.slice(-12);
+    const rep = buildMonthlyReport(u, ym);
+    u.monthlyReports = (Array.isArray(u.monthlyReports) ? u.monthlyReports : []).filter((r) => r.ym !== ym);
+    u.monthlyReports.push(rep);
+    if (u.monthlyReports.length > 12) u.monthlyReports = u.monthlyReports.slice(-12);
     writeJSON(DATA_FILE, data);
     return send(200, { ok: true, report: rep });
   }
   if (pathname === '/api/api-token' && req.method === 'POST') {
     const data = loadData();
-    data.apiToken = crypto.randomBytes(24).toString('hex');
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
+    u.apiToken = crypto.randomBytes(24).toString('hex');
     writeJSON(DATA_FILE, data);
-    return send(200, { ok: true, token: data.apiToken });
+    return send(200, { ok: true, token: u.apiToken });
   }
   if (pathname === '/api/api-token/revoke' && req.method === 'POST') {
     const data = loadData();
-    delete data.apiToken;
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
+    delete u.apiToken;
     writeJSON(DATA_FILE, data);
     return send(200, { ok: true });
   }
   /* v60：GitHub 自动备份——配好 Token 和私有仓库后，每天自动把数据推过去；手动也能立即推 */
   if (pathname === '/api/github-backup/status' && req.method === 'GET') {
     const data = loadData();
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
     const gb = data.githubBackup || {};
     return send(200, { configured: !!(gb.token && gb.repo), repo: gb.repo || '', branch: gb.branch || 'main', lastAt: gb.lastAt || '', lastOk: !!gb.lastOk, lastNote: gb.lastNote || '' });
   }
   if (pathname === '/api/github-backup/save' && req.method === 'POST') {
     const body = await jsonBody(req);
     const data = loadData();
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
     const gb = data.githubBackup || {};
     const token = String(body.token || '').trim();
     const repo = String(body.repo || '').trim();
@@ -1858,11 +2292,13 @@ async function handleAPI(req, res, pathname) {
      同步口令能读写整盘数据，只配在自己的服务器之间，别外泄 */
   if (pathname === '/api/sync/config' && req.method === 'GET') {
     const data = loadData();
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
     const last = data.syncLast || {};
     return send(200, { configured: !!(data.syncToken && (data.syncPeers || []).length), hasToken: !!data.syncToken, peers: data.syncPeers || [], lastAt: last.at || '', lastPulled: last.pulled || 0, lastPushed: last.pushed || 0 });
   }
   if (pathname === '/api/sync/token' && req.method === 'POST') {
     const data = loadData();
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
     data.syncToken = crypto.randomBytes(32).toString('hex');
     writeJSON(DATA_FILE, data);
     return send(200, { ok: true, token: data.syncToken });
@@ -1870,6 +2306,7 @@ async function handleAPI(req, res, pathname) {
   if (pathname === '/api/sync/config' && req.method === 'POST') {
     const body = await jsonBody(req);
     const data = loadData();
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
     const token = String(body.token || '').trim();
     if (token) data.syncToken = token;
     const peers = (Array.isArray(body.peers) ? body.peers : String(body.peers || '').split('\n')).map((u) => String(u).trim()).filter((u) => /^https?:\/\//i.test(u)).slice(0, 5);
@@ -1884,33 +2321,37 @@ async function handleAPI(req, res, pathname) {
   }
   if (pathname === '/api/totp/status' && req.method === 'GET') {
     const data = loadData();
-    return send(200, { enabled: !!data.totpEnabled });
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
+    return send(200, { enabled: !!u.totpEnabled });
   }
   if (pathname === '/api/totp/setup' && req.method === 'POST') {
     const data = loadData();
-    data.totpSecret = base32Encode(crypto.randomBytes(20));
-    data.totpEnabled = false;
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
+    u.totpSecret = base32Encode(crypto.randomBytes(20));
+    u.totpEnabled = false;
     writeJSON(DATA_FILE, data);
-    const label = encodeURIComponent(`hubmate:${data.username || 'user'}`);
-    const otpauth = `otpauth://totp/${label}?secret=${data.totpSecret}&issuer=hubmate&algorithm=SHA1&digits=6&period=30`;
-    return send(200, { ok: true, secret: data.totpSecret, otpauth });
+    const label = encodeURIComponent(`hubmate:${me.username || 'user'}`);
+    const otpauth = `otpauth://totp/${label}?secret=${u.totpSecret}&issuer=hubmate&algorithm=SHA1&digits=6&period=30`;
+    return send(200, { ok: true, secret: u.totpSecret, otpauth });
   }
   if (pathname === '/api/totp/enable' && req.method === 'POST') {
     const body = await jsonBody(req);
     const data = loadData();
-    if (!data.totpSecret) return send(400, { error: '先点“生成密钥”' });
-    if (!verifyTotp(data.totpSecret, body.code)) return send(401, { error: '动态码不对，请对一下手机时间' });
-    data.totpEnabled = true;
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
+    if (!u.totpSecret) return send(400, { error: '先点“生成密钥”' });
+    if (!verifyTotp(u.totpSecret, body.code)) return send(401, { error: '动态码不对，请对一下手机时间' });
+    u.totpEnabled = true;
     writeJSON(DATA_FILE, data);
     return send(200, { ok: true });
   }
   if (pathname === '/api/totp/disable' && req.method === 'POST') {
     const body = await jsonBody(req);
     const data = loadData();
-    if (!verifyPassword(body.password, data.passwordHash)) return send(401, { error: '密码不对' });
-    if (data.totpEnabled && !verifyTotp(data.totpSecret, body.code)) return send(401, { error: '动态码不对' });
-    delete data.totpSecret;
-    data.totpEnabled = false;
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
+    if (!verifyPassword(body.password, me.passwordHash)) return send(401, { error: '密码不对' });
+    if (u.totpEnabled && !verifyTotp(u.totpSecret, body.code)) return send(401, { error: '动态码不对' });
+    delete u.totpSecret;
+    u.totpEnabled = false;
     writeJSON(DATA_FILE, data);
     return send(200, { ok: true });
   }
@@ -1918,28 +2359,31 @@ async function handleAPI(req, res, pathname) {
   /* ---------- 记事本：仅登录后可用，不进公开接口、不上落地页 ---------- */
   if (pathname === '/api/notes' && req.method === 'GET') {
     const data = loadData();
-    return send(200, (data.notes || []).slice().sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || '')));
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
+    return send(200, (u.notes || []).slice().sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || '')));
   }
   if (pathname === '/api/notes' && req.method === 'POST') {
     const data = loadData();
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
     const b = await jsonBody(req);
     const title = String(b.title || '').trim().slice(0, 100);
     const content = String(b.content || '').trim().slice(0, 20000);
     if (!title && !content) return send(400, { error: '标题和内容不能都空' });
     const now = cstDateTime();
     const note = { id: crypto.randomBytes(12).toString('hex'), title, content, createdAt: now, updatedAt: now };
-    data.notes = data.notes || [];
-    data.notes.unshift(note);
+    u.notes = u.notes || [];
+    u.notes.unshift(note);
     writeJSON(DATA_FILE, data);
     return send(200, note);
   }
   if (pathname.startsWith('/api/notes/') && (req.method === 'PUT' || req.method === 'DELETE')) {
     const id = decodeURIComponent(pathname.slice('/api/notes/'.length));
     const data = loadData();
-    const note = (data.notes || []).find((n) => n.id === id);
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
+    const note = (u.notes || []).find((n) => n.id === id);
     if (!note) return send(404, { error: '找不到这条记事' });
     if (req.method === 'DELETE') {
-      data.notes = data.notes.filter((n) => n.id !== id);
+      u.notes = u.notes.filter((n) => n.id !== id);
       writeJSON(DATA_FILE, data);
       return send(200, { ok: true });
     }
@@ -1953,7 +2397,9 @@ async function handleAPI(req, res, pathname) {
   }
 
   if (pathname === '/api/me' && req.method === 'GET') {
-    return send(200, { username: loadData().username });
+    const data = loadData();
+    const me = findUser(data, meId);
+    return send(200, { username: me.username, isAdmin: !!me.isAdmin });
   }
   if (pathname === '/api/logout' && req.method === 'POST') {
     delete auth.sessions[auth.token];
@@ -1963,17 +2409,20 @@ async function handleAPI(req, res, pathname) {
   if (pathname === '/api/password' && req.method === 'POST') {
     const body = await jsonBody(req);
     const data = loadData();
-    if (!verifyPassword(body.oldPassword, data.passwordHash)) return send(400, { error: '旧密码不对' });
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
+    if (!verifyPassword(body.oldPassword, me.passwordHash)) return send(400, { error: '旧密码不对' });
     if (!body.newPassword || String(body.newPassword).length < 6) return send(400, { error: '新密码至少 6 位' });
-    data.passwordHash = hashPassword(body.newPassword);
-    data.passwordIsDefault = false;
+    me.passwordHash = hashPassword(body.newPassword);
+    me.passwordIsDefault = false;
     writeJSON(DATA_FILE, data);
     return send(200, { ok: true });
   }
   /* Telegram 通知设置：Token 永不返回给前端，留空表示不改；
      v62：Webhook 地址、Bark Key、Server酱 Key 也一样，只返回配没配，不返回原值 */
   if (pathname === '/api/notify' && req.method === 'GET') {
-    const n = notifyCfg(loadData());
+    const data = loadData();
+    const u = userData(data, meId);
+    const n = notifyCfg(u);
     return send(200, {
       configured: !!(n.token && n.chatId),
       chatId: n.chatId || '',
@@ -1991,7 +2440,8 @@ async function handleAPI(req, res, pathname) {
   if (pathname === '/api/notify' && req.method === 'POST') {
     const body = await jsonBody(req);
     const data = loadData();
-    const n = notifyCfg(data);
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
+    const n = notifyCfg(u);
     if (typeof body.token === 'string' && body.token.trim()) n.token = body.token.trim().slice(0, 200);
     if (typeof body.chatId === 'string' && body.chatId.trim()) n.chatId = body.chatId.trim().slice(0, 64);
     /* v62：三个新渠道——和 Token 同口径：填了就保存，留空表示不改 */
@@ -2017,14 +2467,15 @@ async function handleAPI(req, res, pathname) {
   }
   if (pathname === '/api/notify/test' && req.method === 'POST') {
     const data = loadData();
-    const n = notifyCfg(data);
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
+    const n = notifyCfg(u);
     const hasAny = (n.token && n.chatId) || n.webhookUrl || n.barkKey || n.serverChanKey;
     if (!hasAny) return send(400, { error: '还没设置任何通知渠道（Telegram / Webhook / Bark / Server酱）' });
     const t = todayStr();
-    const cohort = checkinCohort(data, t);
+    const cohort = checkinCohort(u, t);
     const done = cohort.filter((s) => (s.checkins || []).includes(t)).length;
-    const items = expiringList(data);
-    const todo = unsignedDaily(data, t);
+    const items = expiringList(u);
+    const todo = unsignedDaily(u, t);
     const expPreview = items.length
       ? `⏰ <b>临期预览</b>（${items.length} 个）：\n${expiringLines(items).join('\n')}`
       : '⏰ <b>临期预览</b>：30 天内暂无临期服务';
@@ -2059,7 +2510,8 @@ async function handleAPI(req, res, pathname) {
   if (pathname === '/api/categories' && req.method === 'POST') {
     const body = await jsonBody(req);
     const data = loadData();
-    const cats = ensureCategories(data);
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
+    const cats = ensureCategories(u);
     const label = String(body.label || '').trim().slice(0, 20);
     if (!label) return send(400, { error: '分类名不能为空' });
     /* v65：“已归档”是系统保留的归档分类名，不能自己新建 */
@@ -2074,7 +2526,8 @@ async function handleAPI(req, res, pathname) {
   if (cm && req.method === 'PUT') {
     const body = await jsonBody(req);
     const data = loadData();
-    const cats = ensureCategories(data);
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
+    const cats = ensureCategories(u);
     const cat = cats.find((c) => c.id === cm[1]);
     if (!cat) return send(404, { error: '找不到该分类' });
     const label = String(body.label || '').trim().slice(0, 20);
@@ -2091,11 +2544,12 @@ async function handleAPI(req, res, pathname) {
     /* v65：归档分类也是系统分类，不能删（删了归档的服务就没地方去了） */
     if (BUILTIN_CATS.has(cm[1]) || cm[1] === ARCHIVED_CAT_ID) return send(400, { error: '系统分类不能删除' });
     const data = loadData();
-    const cats = ensureCategories(data);
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
+    const cats = ensureCategories(u);
     const idx = cats.findIndex((c) => c.id === cm[1]);
     if (idx < 0) return send(404, { error: '找不到该分类' });
     /* 非空分类不让删：先把旗下服务编辑到其他分类，免得删完不知去向 */
-    const used = data.services.filter((s) => s.category === cm[1]).length;
+    const used = u.services.filter((s) => s.category === cm[1]).length;
     if (used) return send(400, { error: `该分类下还有 ${used} 个服务，请先把它们编辑到其他分类后再删除` });
     cats.splice(idx, 1);
     writeJSON(DATA_FILE, data);
@@ -2104,7 +2558,8 @@ async function handleAPI(req, res, pathname) {
   /* 自动取 Chat ID：用户先给机器人发 /start，这里取最近一条消息的发送者 */
   if (pathname === '/api/notify/resolve' && req.method === 'POST') {
     const data = loadData();
-    const n = notifyCfg(data);
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
+    const n = notifyCfg(u);
     if (!n.token) return send(400, { error: '请先保存 Token' });
     try {
       const res = await fetch(tgApiUrl(n.token, 'getUpdates'), {
@@ -2120,14 +2575,25 @@ async function handleAPI(req, res, pathname) {
     } catch (e) { return send(400, { error: `获取失败：${e.message}` }); }
   }
   if (pathname === '/api/export-md' && req.method === 'POST') {
-    fs.writeFileSync(LEDGER_FILE, ledgerMarkdown(loadData()), 'utf8');
+    const data = loadData();
+    fs.writeFileSync(LEDGER_FILE, ledgerMarkdown(userData(data, meId)), 'utf8');
     return send(200, { ok: true, file: '服务台账.md' });
   }
   /* 一键备份：下载完整数据，但密码哈希和机器人 Token 绝不外带；
-     恢复时这两项永远沿用当前值，旧版原始备份也能照常恢复 */
+     恢复时这两项永远沿用当前值，旧版原始备份也能照常恢复；
+     v67：管理员下整盘（所有用户），普通用户只下自己的数据 */
   if (pathname === '/api/backup' && req.method === 'GET') {
     const data = loadData();
-    const out = strippedBackupData(data);
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
+    let out;
+    if (me.isAdmin) {
+      out = strippedBackupData(data);
+    } else {
+      out = {
+        users: [{ id: me.id, username: me.username, isAdmin: false, banned: !!me.banned, createdAt: me.createdAt || '' }],
+        userData: { [me.id]: strippedUserData(u) }
+      };
+    }
     const fname = `service-hub-backup-${todayStr()}.json`;
     res.writeHead(200, Object.assign({
       'Content-Type': 'application/json; charset=utf-8',
@@ -2136,101 +2602,63 @@ async function handleAPI(req, res, pathname) {
     }, SEC_HEADERS));
     return res.end(JSON.stringify(out, null, 2));
   }
-  /* 恢复备份：先把当前数据自动存一份，再整体替换（账号密码和机器人 Token 永远不动） */
+  /* 恢复备份：先把当前数据自动存一份，再整体替换（账号密码和机器人 Token 永远不动）；
+     v67：按用户归属恢复——管理员恢复整盘时各用户的数据各回各家（只恢复已存在的用户，
+     删掉的用户不复活）；普通用户只恢复自己的那份；旧格式备份（顶层就是服务列表）
+     当成当前用户的数据恢复 */
   if (pathname === '/api/backup' && req.method === 'POST') {
     const body = await jsonBody(req);
     const imp = body && body.data ? body.data : body;
-    if (!imp || !Array.isArray(imp.services)) return send(400, { error: '备份文件不对：里面没有服务列表' });
-    for (const s of imp.services) {
-      if (!s || typeof s.id !== 'string' || typeof s.name !== 'string' || !s.name.trim()) {
-        return send(400, { error: '备份文件不对：有服务缺名字或编号' });
-      }
-    }
     const data = loadData();
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
     try {
       const stamp = new Date().toISOString().replace(/[:.]/g, '-');
       fs.writeFileSync(path.join(DATA_DIR, `backup-before-import-${stamp}.json`), JSON.stringify(data, null, 2));
       const olds = fs.readdirSync(DATA_DIR).filter((f) => f.startsWith('backup-before-import-')).sort();
       while (olds.length > 5) fs.unlinkSync(path.join(DATA_DIR, olds.shift()));
     } catch {}
-    const cats = Array.isArray(imp.categories) && imp.categories.length
-      ? imp.categories.filter((c) => c && typeof c.id === 'string' && typeof c.label === 'string' && c.label.trim())
-      : categoriesOf(data);
-    const catIds = new Set(cats.map((c) => c.id));
-    const seen = new Set();
-    data.services = imp.services.filter((s) => { if (seen.has(String(s.id))) return false; seen.add(String(s.id)); return true; }).map((s) => ({
-      id: String(s.id),
-      name: String(s.name).slice(0, 100),
-      category: catIds.has(s.category) ? s.category : 'relay',
-      url: String(s.url || '').slice(0, 500),
-      account: String(s.account || '').slice(0, 500),
-      secret: String(s.secret || '').slice(0, 500),
-      price: String(s.price || '').slice(0, 500),
-      notes: String(s.notes || '').slice(0, 500),
-      registeredAt: String(s.registeredAt || ''),
-      expiresAt: String(s.expiresAt || ''),
-      checkinFrequency: s.checkinFrequency === 'daily' ? 'daily' : 'none',
-      checkinEveryDays: clampInt(s.checkinEveryDays, 1, 365, 1),
-      renewDays: clampInt(s.renewDays, 1, 3650, 365),
-      favorite: !!s.favorite,
-      abnormal: !!s.abnormal,
-      accounts: (Array.isArray(s.accounts) ? s.accounts : []).map(sanitizeAccount).filter(Boolean).slice(0, 20),
-      checkins: Array.isArray(s.checkins) ? s.checkins.filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)) : [],
-      visits: Number(s.visits) || 0,
-      sortOrder: Number(s.sortOrder) || 0,
-      linkStatus: s.linkStatus,
-      linkHistory: (Array.isArray(s.linkHistory) ? s.linkHistory : []).filter((h) => h && typeof h.t === 'number' && typeof h.ok === 'boolean').slice(-120),
-      renewHistory: (Array.isArray(s.renewHistory) ? s.renewHistory : []).filter((h) => h && /^\d{4}-\d{2}-\d{2}$/.test(h.at || '') && typeof h.from === 'string' && typeof h.to === 'string').slice(-20),
-      tags: (Array.isArray(s.tags) ? s.tags : []).map((t) => String(t).trim().slice(0, 20)).filter(Boolean).slice(0, 10),
-      customFields: sanitizeCustomFields(s.customFields),
-      autoSignin: sanitizeAutoSignin(s.autoSignin),
-      autoSigninLast: (s.autoSigninLast && typeof s.autoSigninLast === 'object') ? { at: String(s.autoSigninLast.at || '').slice(0, 30), ok: !!s.autoSigninLast.ok, status: Number(s.autoSigninLast.status) || 0, note: String(s.autoSigninLast.note || '').slice(0, 200) } : undefined,
-      /* v65：证书到期日、建站日期也随备份恢复 */
-      certExpiresAt: /^\d{4}-\d{2}-\d{2}$/.test(s.certExpiresAt || '') ? s.certExpiresAt : undefined,
-      certCheckedAt: /^\d{4}-\d{2}-\d{2}$/.test(s.certCheckedAt || '') ? s.certCheckedAt : undefined,
-      createdAt: /^\d{4}-\d{2}-\d{2}$/.test(s.createdAt || '') ? s.createdAt : undefined
-    }));
-    /* v65：先恢复共享账号库，再归一化账号——链接账号要按库解析（库里没有就退回成本地副本） */
-    if (Array.isArray(imp.sharedAccounts)) {
-      data.sharedAccounts = imp.sharedAccounts.map(sanitizeVaultAccount).filter(Boolean).slice(0, 200);
-    }
-    /* v62：恢复后归一化账号——默认账号的镜像（account/secret）跟恢复回来的 accounts 走，
-       不然旧备份里只有镜像、没有 accounts 数组的服务会丢账号 */
-    data.services.forEach((s) => normalizeAccounts(s, vaultOf(data)));
-    data.categories = cats.map((c) => ({ id: c.id, label: String(c.label).slice(0, 20), icon: cleanIcon(c.icon), cls: c.cls || 't-custom' }));
-    if (imp.history && typeof imp.history === 'object') data.history = imp.history;
-    if (imp.achievements && typeof imp.achievements === 'object') data.achievements = imp.achievements;
-    if (Number(imp.xp) >= 0) data.xp = Number(imp.xp);
-    if (imp.flags && typeof imp.flags === 'object') data.flags = imp.flags;
-    /* v65：月度报告、登录历史、归档日志也随备份恢复（都是用户自己的数据，不含密钥） */
-    if (Array.isArray(imp.monthlyReports)) data.monthlyReports = imp.monthlyReports.filter((r) => r && typeof r.ym === 'string').slice(-12);
-    if (Array.isArray(imp.loginHistory)) data.loginHistory = imp.loginHistory.filter((h) => h && typeof h.at === 'string').slice(-50);
-    if (Array.isArray(imp.archivedLog)) data.archivedLog = imp.archivedLog.filter((a) => a && typeof a.at === 'string').slice(-50);
-    if (imp.notify && typeof imp.notify === 'object') {
-      const n = notifyCfg(data);
-      /* v62：Token、Webhook 地址、Bark Key、Server酱 Key 永远沿用当前值，不被备份盖掉 */
-      const keep = { token: n.token, webhookUrl: n.webhookUrl, barkKey: n.barkKey, serverChanKey: n.serverChanKey };
-      Object.assign(n, imp.notify);
-      for (const k of ['token', 'webhookUrl', 'barkKey', 'serverChanKey']) {
-        if (keep[k]) n[k] = keep[k]; else delete n[k];
+    const validServices = (arr) => Array.isArray(arr) && arr.every((s) => s && typeof s.id === 'string' && typeof s.name === 'string' && s.name.trim());
+    if (imp && imp.userData && typeof imp.userData === 'object') {
+      /* 新格式：按用户归属恢复 */
+      const targets = [];
+      if (me.isAdmin) {
+        for (const [uid, ud] of Object.entries(imp.userData)) {
+          if (findUser(data, uid) && validServices(ud && ud.services)) targets.push([uid, ud]);
+        }
+      } else if (imp.userData[me.id] && validServices(imp.userData[me.id].services)) {
+        targets.push([me.id, imp.userData[me.id]]);
+      } else {
+        /* 跨服务器恢复：文件里只有一个人时，就当是当前用户自己的备份 */
+        const entries = Object.entries(imp.userData);
+        if (entries.length === 1 && validServices(entries[0][1] && entries[0][1].services)) targets.push([me.id, entries[0][1]]);
       }
+      if (!targets.length) return send(400, { error: '备份文件不对：里面没有你的数据' });
+      for (const [uid, ud] of targets) restoreUserData(data, uid, ud);
+      writeJSON(DATA_FILE, data);
+      return send(200, { ok: true, services: userData(data, meId).services.length, restoredUsers: targets.length });
     }
+    if (!imp || !Array.isArray(imp.services)) return send(400, { error: '备份文件不对：里面没有服务列表' });
+    if (!validServices(imp.services)) return send(400, { error: '备份文件不对：有服务缺名字或编号' });
+    restoreUserData(data, me.id, imp);
     writeJSON(DATA_FILE, data);
-    return send(200, { ok: true, services: data.services.length });
+    return send(200, { ok: true, services: userData(data, meId).services.length });
   }
   if (pathname === '/api/meta' && req.method === 'GET') {
     const data = loadData();
-    const unlocked = syncAchievements(data);
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
+    const unlocked = syncAchievements(u);
     if (unlocked.length) writeJSON(DATA_FILE, data);
-    return send(200, metaPayload(data));
+    return send(200, metaPayload(me, u));
   }
 
   if (pathname === '/api/services' && req.method === 'GET') {
-    return send(200, loadData().services);
+    const data = loadData();
+    return send(200, userData(data, meId).services);
   }
   if (pathname === '/api/services' && req.method === 'POST') {
     const data = loadData();
-    const f = pickFields(await jsonBody(req), null, categoriesOf(data).map((c) => c.id), vaultOf(data));
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
+    const f = pickFields(await jsonBody(req), null, categoriesOf(u).map((c) => c.id), vaultOf(u));
     if (!f.name) return send(400, { error: '名称必填' });
     const svc = Object.assign({
       id: crypto.randomBytes(12).toString('hex'),
@@ -2241,11 +2669,11 @@ async function handleAPI(req, res, pathname) {
       createdAt: todayStr(),
       checkinFrequency: 'none', checkinEveryDays: 1, renewDays: 365, checkins: [],
       visits: 0,
-      sortOrder: Math.min(0, ...data.services.map((s) => s.sortOrder ?? 0)) - 1 // 新服务排最前
+      sortOrder: Math.min(0, ...u.services.map((s) => s.sortOrder ?? 0)) - 1 // 新服务排最前
     }, f);
-    data.services.push(svc);
-    data.xp += 10; // 记录新服务 +10 热情值
-    const unlocked = syncAchievements(data);
+    u.services.push(svc);
+    u.xp += 10; // 记录新服务 +10 热情值
+    const unlocked = syncAchievements(u);
     writeJSON(DATA_FILE, data);
     return send(200, { ...svc, xpGained: 10, unlocked });
   }
@@ -2257,11 +2685,12 @@ async function handleAPI(req, res, pathname) {
     if (!rows.length) return send(400, { error: '没有可导入的服务' });
     if (rows.length > 500) return send(400, { error: '一次最多导入 500 个' });
     const data = loadData();
-    const catIds = categoriesOf(data).map((c) => c.id);
-    let maxOrder = data.services.reduce((m, s) => Math.max(m, s.sortOrder ?? 0), 0);
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
+    const catIds = categoriesOf(u).map((c) => c.id);
+    let maxOrder = u.services.reduce((m, s) => Math.max(m, s.sortOrder ?? 0), 0);
     let imported = 0;
     for (const r of rows) {
-      const f = pickFields(r || {}, null, catIds, vaultOf(data));
+      const f = pickFields(r || {}, null, catIds, vaultOf(u));
       if (!f.name) continue;
       const svc = Object.assign({
         id: crypto.randomBytes(12).toString('hex'),
@@ -2272,11 +2701,11 @@ async function handleAPI(req, res, pathname) {
         visits: 0,
         sortOrder: ++maxOrder
       }, f);
-      data.services.push(svc);
+      u.services.push(svc);
       imported++;
     }
     if (imported) {
-      syncAchievements(data);
+      syncAchievements(u);
       writeJSON(DATA_FILE, data);
     }
     return send(200, { ok: true, imported, skipped: rows.length - imported });
@@ -2290,12 +2719,13 @@ async function handleAPI(req, res, pathname) {
     if (rows.length > 500) return send(400, { error: '一次最多导入 500 个' });
     const normUrl = (u) => String(u || '').trim().toLowerCase().replace(/\/+$/, '');
     const data = loadData();
-    const catIds = categoriesOf(data).map((c) => c.id);
-    const seenUrls = new Set(data.services.map((s) => normUrl(s.url)).filter(Boolean));
-    let maxOrder = data.services.reduce((m, s) => Math.max(m, s.sortOrder ?? 0), 0);
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
+    const catIds = categoriesOf(u).map((c) => c.id);
+    const seenUrls = new Set(u.services.map((s) => normUrl(s.url)).filter(Boolean));
+    let maxOrder = u.services.reduce((m, s) => Math.max(m, s.sortOrder ?? 0), 0);
     let imported = 0, dupes = 0;
     for (const r of rows) {
-      const f = pickFields(r || {}, null, catIds, vaultOf(data));
+      const f = pickFields(r || {}, null, catIds, vaultOf(u));
       if (!f.name) continue;
       const nu = normUrl(f.url);
       if (nu && seenUrls.has(nu)) { dupes++; continue; }
@@ -2308,12 +2738,12 @@ async function handleAPI(req, res, pathname) {
         visits: 0,
         sortOrder: ++maxOrder
       }, f);
-      data.services.push(svc);
+      u.services.push(svc);
       if (nu) seenUrls.add(nu);
       imported++;
     }
     if (imported) {
-      syncAchievements(data);
+      syncAchievements(u);
       writeJSON(DATA_FILE, data);
     }
     return send(200, { ok: true, imported, skipped: rows.length - imported - dupes, dupes });
@@ -2327,8 +2757,9 @@ async function handleAPI(req, res, pathname) {
     if (!rows.length) return send(400, { error: '没有可导入的账号' });
     if (rows.length > 500) return send(400, { error: '一次最多导入 500 个' });
     const data = loadData();
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
     const byName = new Map();
-    for (const s of data.services) {
+    for (const s of u.services) {
       const key = String(s.name || '').trim().toLowerCase();
       if (key && !byName.has(key)) byName.set(key, s);
     }
@@ -2350,11 +2781,11 @@ async function handleAPI(req, res, pathname) {
       if (!acc || !acc.username) continue;
       /* v65：新导入的账号，改密日记今天（密码是新录入的） */
       if (acc.password) acc.passwordChangedAt = todayStr();
-      normalizeAccounts(svc, vaultOf(data));
+      normalizeAccounts(svc, vaultOf(u));
       if (svc.accounts.some((a) => String(a.username || '').trim().toLowerCase() === acc.username.toLowerCase())) { dupes++; continue; }
       acc.isDefault = svc.accounts.length === 0;
       svc.accounts.push(acc);
-      normalizeAccounts(svc, vaultOf(data));
+      normalizeAccounts(svc, vaultOf(u));
       imported++;
     }
     if (imported) writeJSON(DATA_FILE, data);
@@ -2364,32 +2795,34 @@ async function handleAPI(req, res, pathname) {
     const body = await jsonBody(req);
     if (!Array.isArray(body.ids)) return send(400, { error: '参数错误' });
     const data = loadData();
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
     const pos = new Map(body.ids.map((x, i) => [String(x), i]));
-    data.services.forEach((s) => { if (pos.has(s.id)) s.sortOrder = pos.get(s.id); });
+    u.services.forEach((s) => { if (pos.has(s.id)) s.sortOrder = pos.get(s.id); });
     writeJSON(DATA_FILE, data);
     return send(200, { ok: true });
   }
   /* 一键全签：一次请求签完当天所有未签（原来前端逐个调，容易签一半断网） */
   if (pathname === '/api/checkins/all' && req.method === 'POST') {
-    return send(200, checkinAllToday(loadData()));
+    return send(200, checkinAllToday(loadData(), meId));
   }
   /* 批量操作：一次改多个服务的分类，或一次删多个 */
   if (pathname === '/api/services/bulk' && req.method === 'POST') {
     const body = await jsonBody(req);
     const data = loadData();
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
     const ids = new Set((Array.isArray(body.ids) ? body.ids : []).map(String));
     if (!ids.size) return send(400, { error: '没有选中服务' });
     if (body.action === 'delete') {
-      const before = data.services.length;
-      data.services = data.services.filter((s) => !ids.has(s.id));
+      const before = u.services.length;
+      u.services = u.services.filter((s) => !ids.has(s.id));
       writeJSON(DATA_FILE, data);
-      return send(200, { ok: true, deleted: before - data.services.length });
+      return send(200, { ok: true, deleted: before - u.services.length });
     }
     if (body.action === 'category') {
-      const catIds = categoriesOf(data).map((c) => c.id);
+      const catIds = categoriesOf(u).map((c) => c.id);
       const cat = catIds.includes(body.category) ? body.category : 'relay';
       let moved = 0;
-      for (const s of data.services) {
+      for (const s of u.services) {
         if (!ids.has(s.id)) continue;
         /* 和单个编辑同一条规则：新选进收藏分类的顺带点星 */
         if (cat === 'fav' && s.category !== 'fav') s.favorite = true;
@@ -2405,7 +2838,7 @@ async function handleAPI(req, res, pathname) {
       const renew = (body.renewDays === '' || body.renewDays == null) ? null : clampInt(body.renewDays, 1, 3650, null);
       if (every === null && renew === null) return send(400, { error: '没填要改的内容' });
       let updated = 0;
-      for (const s of data.services) {
+      for (const s of u.services) {
         if (!ids.has(s.id)) continue;
         if (every !== null) s.checkinEveryDays = every;
         if (renew !== null) s.renewDays = renew;
@@ -2420,9 +2853,10 @@ async function handleAPI(req, res, pathname) {
   const m = pathname.match(/^\/api\/services\/([0-9a-f]+)(\/checkin|\/uncheckin|\/checkin-account|\/uncheckin-account|\/visit|\/undo-renew|\/renew|\/move|\/duplicate)?$/);
   if (m) {
     const data = loadData();
-    const idx = data.services.findIndex((s) => s.id === m[1]);
+    const me = findUser(data, meId); const u = userData(data, meId); ensureMeta(u);
+    const idx = u.services.findIndex((s) => s.id === m[1]);
     if (idx < 0) return send(404, { error: '找不到该服务' });
-    const svc = data.services[idx];
+    const svc = u.services[idx];
     const t = todayStr();
     /* 访问计数：点「前往」/标题链接时打点 */
     if (req.method === 'POST' && m[2] === '/visit') {
@@ -2435,18 +2869,18 @@ async function handleAPI(req, res, pathname) {
       let xpGained = 0;
       const accs = serviceAccounts(svc);
       if (accs.length) {
-        for (const a of accs) xpGained += doCheckinAccount(data, svc, a, t);
+        for (const a of accs) xpGained += doCheckinAccount(u, svc, a, t);
       } else {
-        xpGained = doCheckin(data, svc, t);
+        xpGained = doCheckin(u, svc, t);
       }
-      const { allDone, bonus } = allDoneBonus(data, t);
+      const { allDone, bonus } = allDoneBonus(u, t);
       xpGained += bonus;
-      data.xp += xpGained;
-      const unlocked = syncAchievements(data);
+      u.xp += xpGained;
+      const unlocked = syncAchievements(u);
       writeJSON(DATA_FILE, data);
       return send(200, {
         ok: true, checkins: svc.checkins, accounts: svc.accounts, xpGained, allDone,
-        unlocked, xp: data.xp, level: levelOf(data.xp)
+        unlocked, xp: u.xp, level: levelOf(u.xp)
       });
     }
     if (req.method === 'POST' && m[2] === '/checkin-account') {
@@ -2454,15 +2888,15 @@ async function handleAPI(req, res, pathname) {
       const body = await jsonBody(req);
       const acc = serviceAccounts(svc).find((a) => a.id === String(body.accountId || ''));
       if (!acc) return send(404, { error: '找不到该账号' });
-      let xpGained = doCheckinAccount(data, svc, acc, t);
-      const { allDone, bonus } = allDoneBonus(data, t);
+      let xpGained = doCheckinAccount(u, svc, acc, t);
+      const { allDone, bonus } = allDoneBonus(u, t);
       xpGained += bonus;
-      data.xp += xpGained;
-      const unlocked = syncAchievements(data);
+      u.xp += xpGained;
+      const unlocked = syncAchievements(u);
       writeJSON(DATA_FILE, data);
       return send(200, {
         ok: true, checkins: svc.checkins, accounts: svc.accounts, xpGained, allDone,
-        unlocked, xp: data.xp, level: levelOf(data.xp)
+        unlocked, xp: u.xp, level: levelOf(u.xp)
       });
     }
     if (req.method === 'POST' && m[2] === '/uncheckin-account') {
@@ -2470,7 +2904,7 @@ async function handleAPI(req, res, pathname) {
       const body = await jsonBody(req);
       const acc = serviceAccounts(svc).find((a) => a.id === String(body.accountId || ''));
       if (!acc) return send(404, { error: '找不到该账号' });
-      doUncheckinAccount(data, svc, acc, t);
+      doUncheckinAccount(u, svc, acc, t);
       writeJSON(DATA_FILE, data);
       return send(200, { ok: true, checkins: svc.checkins, accounts: svc.accounts });
     }
@@ -2514,7 +2948,7 @@ async function handleAPI(req, res, pathname) {
       /* 卡片上移/下移：只在同分类内按 sortOrder 换位，和拖拽排序同一套顺序 */
       const body = await jsonBody(req);
       const dir = body.dir === 'down' ? 1 : -1;
-      const group = data.services.filter((s) => s.category === svc.category).sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
+      const group = u.services.filter((s) => s.category === svc.category).sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
       const i = group.findIndex((s) => s.id === svc.id);
       const j = i + dir;
       if (i < 0 || j < 0 || j >= group.length) return send(200, { ok: true, moved: false });
@@ -2525,7 +2959,7 @@ async function handleAPI(req, res, pathname) {
     if (req.method === 'POST' && m[2] === '/duplicate') {
       /* v59：复制服务——新编号、名字后加“副本”、排在同分类最后；签到记录/访问/续期历史
          不带过去（新服务从零开始），账号带过去（新编号，签到记录清掉），改完再调 */
-      const maxOrder = data.services.filter((s) => s.category === svc.category).reduce((n, s) => Math.max(n, s.sortOrder ?? 0), 0);
+      const maxOrder = u.services.filter((s) => s.category === svc.category).reduce((n, s) => Math.max(n, s.sortOrder ?? 0), 0);
       const copy = {
         ...svc,
         id: crypto.randomBytes(6).toString('hex'),
@@ -2545,7 +2979,7 @@ async function handleAPI(req, res, pathname) {
       };
       copy.account = copy.accounts.find((a) => a.isDefault)?.username || '';
       copy.secret = copy.accounts.find((a) => a.isDefault)?.password || '';
-      data.services.push(copy);
+      u.services.push(copy);
       writeJSON(DATA_FILE, data);
       return send(200, copy);
     }
@@ -2556,20 +2990,20 @@ async function handleAPI(req, res, pathname) {
         for (const a of accs) a.checkins = accountCheckins(a).filter((d) => d !== t);
       }
       svc.checkins = svc.checkins.filter((d) => d !== t);
-      if (data.history[t]) data.history[t].c = Math.max(0, (data.history[t].c || 1) - 1);
+      if (u.history[t]) u.history[t].c = Math.max(0, (u.history[t].c || 1) - 1);
       writeJSON(DATA_FILE, data);
       return send(200, { ok: true, checkins: svc.checkins, accounts: svc.accounts });
     }
     if (req.method === 'PUT' && !m[2]) {
       const body = await jsonBody(req);
-      Object.assign(svc, pickFields(body, svc, categoriesOf(data).map((c) => c.id), vaultOf(data)));
+      Object.assign(svc, pickFields(body, svc, categoriesOf(u).map((c) => c.id), vaultOf(u)));
       /* 手动改了到期日或开始时间，之前的续期快照就作废，免得撤回续期把手改的日期盖回去 */
       if (typeof body.expiresAt === 'string' || typeof body.registeredAt === 'string') { delete svc.prevRenew; delete svc.prevExpiresAt; }
       writeJSON(DATA_FILE, data);
       return send(200, svc);
     }
     if (req.method === 'DELETE' && !m[2]) {
-      data.services.splice(idx, 1);
+      u.services.splice(idx, 1);
       writeJSON(DATA_FILE, data);
       return send(200, { ok: true });
     }

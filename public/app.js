@@ -404,9 +404,14 @@ async function api(url, opts = {}) {
 /* ---------- 数据 ---------- */
 async function loadAll() {
   [services, meta] = await Promise.all([api('/api/services'), api('/api/meta')]);
-  me = { username: meta.username };
+  me = { username: meta.username, userId: meta.userId, isAdmin: !!meta.isAdmin };
   mode = 'live';
   setCats(meta.categories);
+  /* v67：管理员才显示用户管理/邀请码面板（接口层也校验 isAdmin，前端藏只是不显示） */
+  document.querySelectorAll('.admin-only').forEach((el) => el.classList.toggle('hidden', !me.isAdmin));
+  const who = $('#account-who');
+  if (who) who.textContent = `当前账号：${me.username}${me.isAdmin ? '（管理员）' : ''}`;
+  if (me.isAdmin) { refreshUsers(); refreshInvites(); }
   /* v65：共享账号库、月度报告、登录历史一起拉（失败也不阻塞主界面） */
   try {
     const [v, mr, lh] = await Promise.all([api('/api/vault'), api('/api/monthly-reports'), api('/api/login-history')]);
@@ -1420,7 +1425,7 @@ document.body.addEventListener('click', async (e) => {
 
   /* 防连点：写数据的按钮点下去就禁用，直到请求 + 刷新完成；失败也恢复。
      只拦真正写数据的动作，打开弹窗/登录/查看密钥这种纯前端动作不拦 */
-  const guarded = ['fav', 'checkin', 'uncheckin', 'checkin-acc', 'uncheckin-acc', 'renew', 'undo-renew', 'move-up', 'move-down', 'del', 'duplicate', 'set-default-acc', 'vault-del', 'am-link-vault', 'acc-to-vault'].includes(act);
+  const guarded = ['fav', 'checkin', 'uncheckin', 'checkin-acc', 'uncheckin-acc', 'renew', 'undo-renew', 'move-up', 'move-down', 'del', 'duplicate', 'set-default-acc', 'vault-del', 'am-link-vault', 'acc-to-vault', 'user-reset', 'user-ban', 'user-unban', 'user-del', 'user-rename-save', 'invite-void'].includes(act);
   if (guarded) btn.disabled = true;
   try {
     if (act === 'wantlogin') { openLogin(); return; }
@@ -1429,6 +1434,57 @@ document.body.addEventListener('click', async (e) => {
       if (expandedRenewHistory.has(id)) expandedRenewHistory.delete(id);
       else expandedRenewHistory.add(id);
       renderExpiring();
+      return;
+    }
+    /* v67：用户管理 + 邀请码（管理员专用，接口层也校验 isAdmin） */
+    if (act === 'user-rename') { userRenameId = id; userDeleteArmed = null; renderUsers(); return; }
+    if (act === 'user-rename-cancel') { userRenameId = null; renderUsers(); return; }
+    if (act === 'user-rename-save') {
+      const inp = $('#rename-user-input');
+      const v = inp ? inp.value.trim() : '';
+      if (!v) { toast('用户名不能为空', 'bad'); return; }
+      try {
+        await api(`/api/admin/users/${id}`, { method: 'PUT', body: JSON.stringify({ username: v }) });
+        userRenameId = null;
+        await refreshUsers();
+        toast('已改名');
+      } catch (err) { handleAuthErr(err); }
+      return;
+    }
+    if (act === 'user-reset') {
+      try {
+        const r = await api(`/api/admin/users/${id}/reset-password`, { method: 'POST', body: JSON.stringify({}) });
+        userResetPw[id] = r.password;
+        await refreshUsers();
+        toast('密码已重置，新密码只显示这一次，记下来发给对方');
+      } catch (err) { handleAuthErr(err); }
+      return;
+    }
+    if (act === 'user-ban' || act === 'user-unban') {
+      try {
+        await api(`/api/admin/users/${id}/ban`, { method: 'POST', body: JSON.stringify({ banned: act === 'user-ban' }) });
+        await refreshUsers();
+        toast(act === 'user-ban' ? '已封禁' : '已解封');
+      } catch (err) { handleAuthErr(err); }
+      return;
+    }
+    if (act === 'user-del') {
+      if (userDeleteArmed !== id) { userDeleteArmed = id; renderUsers(); return; }
+      userDeleteArmed = null;
+      try {
+        await api(`/api/admin/users/${id}`, { method: 'DELETE' });
+        delete userResetPw[id];
+        await refreshUsers();
+        toast('已删除该用户及他的全部数据');
+      } catch (err) { handleAuthErr(err); }
+      return;
+    }
+    if (act === 'invite-void') {
+      try {
+        await api(`/api/admin/invite-codes/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        await refreshInvites();
+        toast('邀请码已作废');
+      } catch (err) { handleAuthErr(err); }
       return;
     }
     /* v58：账号管理弹窗的打开/编辑/删除（弹窗本身不写数据，保存时才 PUT） */
@@ -1712,6 +1768,117 @@ const landingFootLogin = $('#landing-foot-login');
 if (landingFootLogin) landingFootLogin.addEventListener('click', openLogin);
 $('#login-cancel').addEventListener('click', () => $('#login-overlay').classList.add('hidden'));
 $('#login-overlay').addEventListener('click', (e) => { if (e.target === e.currentTarget) $('#login-overlay').classList.add('hidden'); });
+
+/* ---------- v67：多用户——注册、改用户名、管理员的用户管理/邀请码 ---------- */
+function showRegister(show) {
+  $('#login-form').classList.toggle('hidden', show);
+  $('#register-form').classList.toggle('hidden', !show);
+  $('#login-hint').classList.toggle('hidden', show);
+  if (show) { $('#r-err').classList.add('hidden'); $('#r-user').focus(); }
+  else { $('#l-err').classList.add('hidden'); $('#l-user').focus(); }
+}
+$('#link-register').addEventListener('click', (e) => { e.preventDefault(); showRegister(true); });
+$('#register-back').addEventListener('click', () => showRegister(false));
+$('#register-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const err = $('#r-err');
+  err.classList.add('hidden');
+  const username = $('#r-user').value.trim();
+  const pw = $('#r-pass').value;
+  const pw2 = $('#r-pass2').value;
+  const code = $('#r-code').value.trim();
+  if (pw !== pw2) { err.textContent = '两次输入的密码不一样'; err.classList.remove('hidden'); return; }
+  try {
+    await api('/api/register', { method: 'POST', body: JSON.stringify({ username, password: pw, inviteCode: code }) });
+    $('#r-pass').value = ''; $('#r-pass2').value = ''; $('#r-code').value = '';
+    showRegister(false);
+    $('#l-user').value = username;
+    toast('注册成功，去登录吧');
+    $('#l-pass').focus();
+  } catch (e2) {
+    err.textContent = e2.message;
+    err.classList.remove('hidden');
+  }
+});
+$('#btn-rename').addEventListener('click', async () => {
+  const newName = $('#rename-new').value.trim();
+  const pw = $('#rename-pass').value;
+  if (!newName) { toast('先填新用户名', 'bad'); return; }
+  if (!pw) { toast('改名要输当前密码确认', 'bad'); return; }
+  try {
+    const r = await api('/api/account/rename', { method: 'POST', body: JSON.stringify({ username: newName, password: pw }) });
+    $('#rename-pass').value = '';
+    me.username = r.username;
+    const who = $('#account-who');
+    if (who) who.textContent = `当前账号：${r.username}${me.isAdmin ? '（管理员）' : ''}`;
+    toast(`用户名已改成 ${r.username}`);
+    await loadAll();
+  } catch (err) { handleAuthErr(err); }
+});
+$('#btn-pass2').addEventListener('click', () => $('#pass-overlay').classList.remove('hidden'));
+$('#btn-user-create').addEventListener('click', async () => {
+  const username = $('#nu-user').value.trim();
+  const password = $('#nu-pass').value;
+  if (!username || !password) { toast('用户名和密码都得填', 'bad'); return; }
+  try {
+    await api('/api/admin/users', { method: 'POST', body: JSON.stringify({ username, password }) });
+    $('#nu-user').value = ''; $('#nu-pass').value = '';
+    await refreshUsers();
+    toast(`已创建用户 ${username}`);
+  } catch (err) { handleAuthErr(err); }
+});
+$('#btn-invite-create').addEventListener('click', async () => {
+  try {
+    const r = await api('/api/admin/invite-codes', { method: 'POST', body: JSON.stringify({}) });
+    await refreshInvites();
+    toast(`邀请码已生成：${r.code.code}`);
+  } catch (err) { handleAuthErr(err); }
+});
+let usersList = [], invitesList = [], userRenameId = null, userDeleteArmed = null, userResetPw = {};
+async function refreshUsers() {
+  if (!me?.isAdmin) return;
+  try {
+    const r = await api('/api/admin/users');
+    usersList = r.users || [];
+    renderUsers();
+  } catch (err) { handleAuthErr(err); }
+}
+async function refreshInvites() {
+  if (!me?.isAdmin) return;
+  try {
+    const r = await api('/api/admin/invite-codes');
+    invitesList = r.codes || [];
+    renderInvites();
+  } catch (err) { handleAuthErr(err); }
+}
+function renderUsers() {
+  const el = $('#users-list');
+  if (!el) return;
+  if (!usersList.length) { el.innerHTML = '<p class="muted">还没有注册用户。</p>'; return; }
+  el.innerHTML = usersList.map((x) => {
+    const isSelf = me && x.id === me.userId;
+    const pw = userResetPw[x.id];
+    return `<div>
+      <div class="landing-checkin-item"><span class="ck">👤</span><span class="ck-name">${esc(x.username)}${x.isAdmin ? ' 👑 管理员' : ''}${x.banned ? ' 🚫 已封禁' : ''}</span><span class="ck-note">注册 ${esc(x.createdAt || '—')} · 最后登录 ${esc(x.lastLoginAt || '从未登录')} · ${x.services} 个服务 · ${x.xp} XP</span>
+      <button class="btn small ghost" data-act="user-rename" data-id="${x.id}">改名</button>
+      <button class="btn small ghost" data-act="user-reset" data-id="${x.id}">重置密码</button>
+      ${x.banned ? `<button class="btn small ghost" data-act="user-unban" data-id="${x.id}">解封</button>` : `<button class="btn small ghost" data-act="user-ban" data-id="${x.id}">封禁</button>`}
+      ${isSelf ? '' : `<button class="btn small ghost" data-act="user-del" data-id="${x.id}">${userDeleteArmed === x.id ? '确认删除？' : '删除'}</button>`}
+      </div>
+      ${userRenameId === x.id ? `<div class="fgrid" style="margin:6px 0 10px"><label class="span2">改成<input id="rename-user-input" value="${esc(x.username)}" maxlength="20"></label></div><div class="modal-acts" style="justify-content:flex-start;margin-bottom:10px"><button class="btn small primary" data-act="user-rename-save" data-id="${x.id}">保存</button><button class="btn small ghost" data-act="user-rename-cancel">取消</button></div>` : ''}
+      ${pw ? `<p class="muted" style="margin:0 0 10px">新密码（只显示这一次，记下来发给对方）：<code>${esc(pw)}</code> <button class="btn small ghost" data-copy="${esc(pw)}">复制</button></p>` : ''}
+    </div>`;
+  }).join('');
+}
+function renderInvites() {
+  const el = $('#invites-list');
+  if (!el) return;
+  if (!invitesList.length) { el.innerHTML = '<p class="muted">还没有邀请码，点上面按钮生成一个。</p>'; return; }
+  el.innerHTML = invitesList.map((c) => `<div class="landing-checkin-item"><span class="ck">🎟️</span><span class="ck-name"><code>${esc(c.code)}</code></span><span class="ck-note">${c.usedBy ? `已用（${esc(c.usedBy)}）` : '未使用'} · 创建 ${esc(c.createdAt || '')}${c.usedAt ? ` · 用掉 ${esc(c.usedAt)}` : ''}</span>
+    <button class="btn small ghost" data-copy="${esc(c.code)}">复制</button>
+    ${c.usedBy ? '' : `<button class="btn small ghost" data-act="invite-void" data-id="${esc(c.code)}">作废</button>`}
+  </div>`).join('');
+}
 
 $('#btn-logout').addEventListener('click', async () => {
   try { await api('/api/logout', { method: 'POST' }); } catch {}
