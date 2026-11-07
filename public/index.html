@@ -11,7 +11,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="apple-touch-icon" href="/icon-180.png">
-<link rel="stylesheet" href="/style.css?v=20261107-57">
+<link rel="stylesheet" href="/style.css?v=20261107-58">
 </head>
 <body class="mode-preview" data-theme="neon">
 
@@ -408,10 +408,6 @@
         </select>
       </label>
       <label class="span2">网址<input id="f-url" placeholder="https://…"></label>
-      <div class="span2" id="accounts-editor">
-        <div class="acc-head"><span>账号 <i class="muted">(可存多个，明文存本机)</i></span><button type="button" id="btn-add-account" class="btn small ghost">➕ 添加账号</button></div>
-        <div id="accounts-list"></div>
-      </div>
       <label>注册 / 购买日期<input id="f-registered" type="date"></label>
       <label>到期日<input id="f-expires" type="date"></label>
       <label>价格<input id="f-price" placeholder="如 $10/年"></label>
@@ -436,6 +432,31 @@
   </div>
 </div>
 
+<!-- 账号管理 弹窗（v58：和服务编辑页分开，单独管一个服务的账号） -->
+<div id="acc-overlay" class="modal-mask hidden">
+  <div class="modal">
+    <h3 id="acc-modal-title">👤 账号管理</h3>
+    <p class="muted" style="margin:0 0 10px">只改这个服务的账号，不碰服务的名字、日期、分类。</p>
+    <div id="am-list"></div>
+    <div id="am-form" class="hidden">
+      <div class="fgrid">
+        <label>账号名称<input id="am-label" placeholder="如：主号"></label>
+        <label>账号<input id="am-username" placeholder="账号"></label>
+        <label class="span2">密码 / 密钥<input id="am-password" placeholder="密码 / 密钥"></label>
+        <label class="span2">备注（可选）<input id="am-notes" placeholder="备注（可选）"></label>
+      </div>
+      <div class="modal-acts">
+        <button id="am-form-cancel" class="btn ghost" type="button">取消</button>
+        <button id="am-form-save" class="btn primary" type="button">保存账号</button>
+      </div>
+    </div>
+    <div class="modal-acts">
+      <button id="am-add" class="btn primary" type="button">➕ 添加账号</button>
+      <button id="am-done" class="btn ghost" type="button">完成</button>
+    </div>
+  </div>
+</div>
+
 <!-- 改密码 弹窗 -->
 <div id="pass-overlay" class="modal-mask hidden">
   <div class="modal narrow">
@@ -453,6 +474,6 @@
 </div>
 
 <div id="toast"></div>
-<script src="/app.js?v=20261107-57"></script>
+<script src="/app.js?v=20261107-58"></script>
 </body>
 </html>

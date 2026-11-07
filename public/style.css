@@ -612,6 +612,9 @@ a:hover { text-decoration: underline; }
 .acc-item-top b { font-size: 14px; }
 .acc-default-tag { font-size: 12px; font-weight: 700; color: var(--accent); }
 .acc-line { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+/* v58：账号管理弹窗里的列表，账号多了自己滚动，表单和按钮不被顶出去 */
+#am-list { display: flex; flex-direction: column; gap: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); margin-bottom: 12px; max-height: 50vh; overflow-y: auto; }
+#am-form { margin-bottom: 12px; }
 .acc-k { color: var(--muted); flex-shrink: 0; }
 .acc-v { flex: 1; min-width: 0; word-break: break-all; }
 .acc-note { font-size: 12px; color: var(--muted); }

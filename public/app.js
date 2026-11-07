@@ -488,35 +488,6 @@ function cardBold(s) {
   return '点击标题直达官网';
 }
 
-/* 卡片上展开的账号面板：密码默认打码，点眼睛才显示；复制、设默认都在这；
-   v57：每天签到的服务，每个账号旁边有自己的签到按钮（签了变“✓ 已签”，点错了能撤回） */
-const expandedAccounts = new Set();
-function accountsPanelHTML(s) {
-  const t = todayStr();
-  const list = accountList(s);
-  const canCheckin = live() && s.checkinFrequency === 'daily' && s.category !== 'idle';
-  const rows = list.map((a) => {
-    const signed = accCheckins(a).includes(t);
-    const signBtn = canCheckin
-      ? (signed
-        ? `<span class="signed-tag">✓ 今日已签</span><button class="btn small ghost" data-act="uncheckin-acc" data-id="${s.id}" data-acc="${esc(a.id)}">↩ 撤回</button>`
-        : `<button class="btn small primary" data-act="checkin-acc" data-id="${s.id}" data-acc="${esc(a.id)}">签到</button>`)
-      : '';
-    return `<div class="acc-item">
-      <div class="acc-item-top"><b>${esc(a.label)}</b>${a.isDefault ? '<span class="acc-default-tag">★ 默认</span>' : `<button class="btn small ghost" data-act="set-default-acc" data-id="${s.id}" data-acc="${esc(a.id)}">设为默认</button>`}<span style="margin-left:auto">${signBtn}</span></div>
-      <div class="acc-line"><span class="acc-k">账号</span><span class="acc-v">${esc(a.username) || '<i class="muted">（空）</i>'}</span><button class="btn small ghost" data-act="copy-acc-user" data-id="${s.id}" data-acc="${esc(a.id)}">复制</button></div>
-      <div class="acc-line"><span class="acc-k">密码</span><span class="acc-v acc-pw">••••••</span><button class="btn small ghost" data-act="toggle-pw" data-id="${s.id}" data-acc="${esc(a.id)}">👁</button><button class="btn small ghost" data-act="copy-acc-pw" data-id="${s.id}" data-acc="${esc(a.id)}">复制</button></div>
-      ${a.notes ? `<div class="acc-note">${esc(a.notes)}</div>` : ''}
-    </div>`;
-  }).join('');
-  const p = serviceProgress(s, t);
-  const prog = (canCheckin && p.total > 1) ? `<span class="muted">已签 ${p.done}/${p.total} · ${Math.round(p.done / p.total * 100)}%</span>` : '';
-  return `<div class="acc-panel">
-    <div class="acc-panel-head"><b>👤 账号（${list.length}）</b>${prog}${s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener">直达网站 ↗</a>` : ''}</div>
-    ${rows || '<div class="empty">还没录账号，点卡片上的「编辑」添加。</div>'}
-  </div>`;
-}
-
 function cardHTML(s, idx) {
   const cat = CATS[s.category] || CATS.relay;
   const num = String(idx + 1).padStart(2, '0');
@@ -553,7 +524,7 @@ function cardHTML(s, idx) {
             ? `<button class="btn small ok" data-act="uncheckin" data-id="${s.id}">↩ 撤回</button>`
             : (dueToday(s, todayStr())
               ? `<button class="btn small primary" data-act="checkin" data-id="${s.id}">签到</button>` : '')) : ''}
-        ${accountList(s).length ? `<button class="btn small ghost" data-act="toggle-accounts" data-id="${s.id}">👤 账号 (${accountList(s).length})</button>` : ''}
+        <button class="btn small ghost" data-act="acc-manager" data-id="${s.id}" title="管这个服务的账号（加/改/删账号）">👤 账号${accountList(s).length ? ` (${accountList(s).length})` : ''}</button>
         <button class="btn small ghost" data-act="edit" data-id="${s.id}">编辑</button>
         <button class="btn small ghost" data-act="move-up" data-id="${s.id}" title="上移">↑</button>
         <button class="btn small ghost" data-act="move-down" data-id="${s.id}" title="下移">↓</button>
@@ -573,7 +544,6 @@ function cardHTML(s, idx) {
     <div class="c-div"></div>
     <div class="c-note">${metaLine}</div>
     ${noteLines.map((l) => `<div class="c-note">${esc(l)}</div>`).join('')}
-    ${expandedAccounts.has(s.id) ? accountsPanelHTML(s) : ''}
     ${actions}
   </div>`;
 }
@@ -871,50 +841,138 @@ function accountList(s) {
   if (s?.account || s?.secret) return [{ id: 'legacy', label: '默认', username: s.account || '', password: s.secret || '', notes: '', isDefault: true }];
   return [];
 }
-function accRowHTML(a) {
-  return `<div class="acc-row" data-acc-id="${esc(a.id || '')}">
-    <div class="acc-row-top">
-      <input class="acc-label" placeholder="名字（如 主号）" value="${esc(a.label || '')}">
-      <label class="acc-default"><input type="radio" name="acc-default" ${a.isDefault ? 'checked' : ''}> 默认</label>
-      <button type="button" class="btn small ghost acc-del">删除</button>
-    </div>
-    <input class="acc-username" placeholder="账号" value="${esc(a.username || '')}">
-    <input class="acc-password" placeholder="密码 / 密钥" value="${esc(a.password || '')}">
-    <input class="acc-notes" placeholder="备注（可选）" value="${esc(a.notes || '')}">
-  </div>`;
+/* ---------- 账号管理弹窗（v58：和服务编辑页分开，单独管一个服务的账号） ---------- */
+let accMgrSvcId = null; // 正在管哪个服务的账号
+let accMgrEditId = null; // 正在编辑哪个账号（null = 正在添加）
+function accMgrSvc() { return services.find((s) => s.id === accMgrSvcId) || null; }
+function openAccManager(svcId) {
+  const svc = services.find((s) => s.id === svcId);
+  if (!svc) return;
+  accMgrSvcId = svcId;
+  accMgrEditId = null;
+  $('#acc-modal-title').textContent = `👤 ${svc.name} 的账号`;
+  hideAccForm();
+  renderAccManager();
+  $('#acc-overlay').classList.remove('hidden');
 }
-function renderAccountsEditor(list) {
-  const box = $('#accounts-list');
+function closeAccManager() {
+  $('#acc-overlay').classList.add('hidden');
+  accMgrSvcId = null;
+  accMgrEditId = null;
+}
+/* 弹窗里的账号列表：只读展示 + 复制/签到/设默认/编辑/删除；编辑和删除都走下面的保存 */
+function renderAccManager() {
+  const box = $('#am-list');
   if (!box) return;
-  const items = (list && list.length ? list : [{ id: '', label: '默认', username: '', password: '', notes: '', isDefault: true }]);
-  box.innerHTML = items.map((a) => accRowHTML(a)).join('');
+  const svc = accMgrSvc();
+  if (!svc) { box.innerHTML = ''; return; }
+  const t = todayStr();
+  const list = accountList(svc);
+  const canCheckin = svc.checkinFrequency === 'daily' && svc.category !== 'idle';
+  const p = serviceProgress(svc, t);
+  const prog = (canCheckin && p.total > 1) ? `<span class="muted">已签 ${p.done}/${p.total} · ${Math.round(p.done / p.total * 100)}%</span>` : '';
+  const head = `<div class="acc-panel-head"><b>👤 账号（${list.length}）</b>${prog}${svc.url ? `<a href="${esc(svc.url)}" target="_blank" rel="noopener">直达网站 ↗</a>` : ''}</div>`;
+  const rows = list.map((a) => {
+    const signed = accCheckins(a).includes(t);
+    const signBtn = canCheckin
+      ? (signed
+        ? `<span class="signed-tag">✓ 今日已签</span><button class="btn small ghost" data-act="uncheckin-acc" data-id="${svc.id}" data-acc="${esc(a.id)}">↩ 撤回</button>`
+        : `<button class="btn small primary" data-act="checkin-acc" data-id="${svc.id}" data-acc="${esc(a.id)}">签到</button>`)
+      : '';
+    return `<div class="acc-item">
+      <div class="acc-item-top"><b>${esc(a.label)}</b>${a.isDefault ? '<span class="acc-default-tag">★ 默认</span>' : `<button class="btn small ghost" data-act="set-default-acc" data-id="${svc.id}" data-acc="${esc(a.id)}">设为默认</button>`}<span style="margin-left:auto;display:flex;gap:6px;align-items:center">${signBtn}<button class="btn small ghost" data-act="acc-edit" data-id="${svc.id}" data-acc="${esc(a.id)}">编辑</button><button class="btn small ghost" data-act="acc-del" data-id="${svc.id}" data-acc="${esc(a.id)}">删除</button></span></div>
+      <div class="acc-line"><span class="acc-k">账号</span><span class="acc-v">${esc(a.username) || '<i class="muted">（空）</i>'}</span><button class="btn small ghost" data-act="copy-acc-user" data-id="${svc.id}" data-acc="${esc(a.id)}">复制</button></div>
+      <div class="acc-line"><span class="acc-k">密码</span><span class="acc-v acc-pw">••••••</span><button class="btn small ghost" data-act="toggle-pw" data-id="${svc.id}" data-acc="${esc(a.id)}">👁</button><button class="btn small ghost" data-act="copy-acc-pw" data-id="${svc.id}" data-acc="${esc(a.id)}">复制</button></div>
+      ${a.notes ? `<div class="acc-note">${esc(a.notes)}</div>` : ''}
+    </div>`;
+  }).join('');
+  box.innerHTML = head + (rows || '<div class="empty">还没录账号，点下面的“➕ 添加账号”。</div>');
 }
-function collectAccounts() {
-  const rows = [...document.querySelectorAll('#accounts-list .acc-row')];
-  const list = rows.map((r) => ({
-    id: r.dataset.accId || '',
-    label: (r.querySelector('.acc-label')?.value || '').trim().slice(0, 30) || '账号',
-    username: (r.querySelector('.acc-username')?.value || '').trim().slice(0, 200),
-    password: (r.querySelector('.acc-password')?.value || '').slice(0, 500),
-    notes: (r.querySelector('.acc-notes')?.value || '').trim().slice(0, 200),
-    isDefault: !!r.querySelector('input[name="acc-default"]')?.checked
-  })).filter((a) => a.username || a.password);
-  if (list.length && !list.some((a) => a.isDefault)) list[0].isDefault = true;
-  return list;
+/* 弹窗关着就什么都不做；开着就按最新的 services 重画（签到/设默认后刷新用） */
+function refreshAccManager() {
+  if (!accMgrSvcId || $('#acc-overlay')?.classList.contains('hidden')) return;
+  if (!accMgrSvc()) { closeAccManager(); return; }
+  renderAccManager();
 }
-$('#btn-add-account').addEventListener('click', () => {
-  const box = $('#accounts-list');
-  if (!box) return;
-  const tmp = document.createElement('div');
-  tmp.innerHTML = accRowHTML({ id: '', label: '', username: '', password: '', notes: '', isDefault: false });
-  box.appendChild(tmp.firstElementChild);
-});
-$('#accounts-list').addEventListener('click', (e) => {
-  const del = e.target.closest('.acc-del');
-  if (!del) return;
-  const row = del.closest('.acc-row');
-  if (row) row.remove();
-});
+function hideAccForm() {
+  $('#am-form')?.classList.add('hidden');
+  accMgrEditId = null;
+}
+function showAccForm(acc) {
+  accMgrEditId = acc ? acc.id : null;
+  $('#am-label').value = acc?.label || '';
+  $('#am-username').value = acc?.username || '';
+  $('#am-password').value = acc?.password || '';
+  $('#am-notes').value = acc?.notes || '';
+  $('#am-form-save').textContent = acc ? '保存修改' : '添加账号';
+  $('#am-form').classList.remove('hidden');
+  $('#am-username').focus();
+}
+/* 把一整份账号数组存回去（带上各账号的签到记录，免得保存时丢了）；保存完刷新列表 */
+async function saveAccAccounts(next) {
+  const svc = accMgrSvc();
+  if (!svc) return;
+  const r = await api(`/api/services/${svc.id}`, { method: 'PUT', body: JSON.stringify({ accounts: next }) });
+  await loadAll();
+  refreshAccManager();
+  return r;
+}
+async function saveAccForm() {
+  const svc = accMgrSvc();
+  if (!svc) return;
+  const username = $('#am-username').value.trim();
+  const password = $('#am-password').value;
+  if (!username && !password) return toast('账号和密码至少填一个', 'bad');
+  const cur = accountList(svc);
+  const one = {
+    id: accMgrEditId || '',
+    label: $('#am-label').value.trim().slice(0, 30) || '账号',
+    username: username.slice(0, 200),
+    password: password.slice(0, 500),
+    notes: $('#am-notes').value.trim().slice(0, 200),
+    isDefault: false
+  };
+  let next;
+  if (accMgrEditId) {
+    const old = cur.find((a) => a.id === accMgrEditId);
+    if (!old) return toast('找不到该账号', 'bad');
+    one.isDefault = old.isDefault;
+    one.checkins = old.checkins || [];
+    next = cur.map((a) => (a.id === accMgrEditId ? one : a));
+  } else {
+    one.isDefault = !cur.length;
+    one.checkins = [];
+    next = [...cur, one];
+  }
+  if (next.length && !next.some((a) => a.isDefault)) next[0].isDefault = true;
+  const saveBtn = $('#am-form-save');
+  if (saveBtn.disabled) return;
+  saveBtn.disabled = true;
+  try {
+    await saveAccAccounts(next);
+    hideAccForm();
+    toast(accMgrEditId ? '已保存' : '已添加账号');
+  } catch (err) { handleAuthErr(err); }
+  finally { saveBtn.disabled = false; }
+}
+async function deleteAccAccount(accId) {
+  const svc = accMgrSvc();
+  if (!svc) return;
+  const acc = accountList(svc).find((a) => a.id === accId);
+  if (!acc) return;
+  if (!confirm(`确定删除账号「${acc.label}」？删除后不可恢复。`)) return;
+  const next = accountList(svc).filter((a) => a.id !== accId);
+  if (next.length && !next.some((a) => a.isDefault)) next[0].isDefault = true;
+  try {
+    await saveAccAccounts(next);
+    toast('已删除账号');
+  } catch (err) { handleAuthErr(err); }
+}
+$('#am-add').addEventListener('click', () => showAccForm(null));
+$('#am-form-cancel').addEventListener('click', hideAccForm);
+$('#am-form-save').addEventListener('click', saveAccForm);
+$('#am-done').addEventListener('click', closeAccManager);
+$('#acc-overlay').addEventListener('click', (e) => { if (e.target === e.currentTarget) closeAccManager(); });
 function openModal(svc) {
   editingId = svc ? svc.id : null;
   $('#modal-title').textContent = svc ? '编辑服务' : '添加服务';
@@ -922,7 +980,6 @@ function openModal(svc) {
   renderCatOptions();
   $('#f-category').value = (svc?.category && CATS[svc.category]) ? svc.category : 'relay';
   $('#f-url').value = svc?.url || '';
-  renderAccountsEditor(accountList(svc || {}));
   $('#f-registered').value = svc?.registeredAt || todayStr();
   $('#f-expires').value = svc?.expiresAt || '';
   expiryDirty = false; // 新开弹窗：到期日还没手动改过，可以自动填
@@ -980,13 +1037,16 @@ document.body.addEventListener('click', async (e) => {
   if (guarded) btn.disabled = true;
   try {
     if (act === 'wantlogin') { openLogin(); return; }
-    /* 多账号面板：展开/收起、复制、显示密码、设默认（纯前端动作不走 guarded，只有设默认写数据） */
-    if (act === 'toggle-accounts') {
-      if (expandedAccounts.has(id)) expandedAccounts.delete(id);
-      else expandedAccounts.add(id);
-      renderGrid();
+    /* v58：账号管理弹窗的打开/编辑/删除（弹窗本身不写数据，保存时才 PUT） */
+    if (act === 'acc-manager') { openAccManager(id); return; }
+    if (act === 'acc-edit') {
+      const svc = services.find((x) => x.id === id);
+      const acc = svc ? accountList(svc).find((a) => a.id === btn.dataset.acc) : null;
+      if (!acc) return;
+      showAccForm(acc);
       return;
     }
+    if (act === 'acc-del') { deleteAccAccount(btn.dataset.acc); return; }
     const findAcc = () => {
       const svc = services.find((x) => x.id === id);
       const acc = svc ? accountList(svc).find((a) => a.id === btn.dataset.acc) : null;
@@ -1021,6 +1081,7 @@ document.body.addEventListener('click', async (e) => {
       const next = accountList(svc).map((a) => ({ ...a, isDefault: a.id === acc.id }));
       await api(`/api/services/${id}`, { method: 'PUT', body: JSON.stringify({ accounts: next }) });
       await loadAll();
+      refreshAccManager();
       toast(`已把「${acc.label}」设为默认账号`);
       return;
     }
@@ -1071,6 +1132,7 @@ document.body.addEventListener('click', async (e) => {
         toast('已撤回该账号的今日签到');
       }
       await loadAll();
+      refreshAccManager();
     } else if (act === 'renew') {
       const r = await api(`/api/services/${id}/renew`, { method: 'POST' });
       await loadAll();
@@ -1191,7 +1253,6 @@ $('#modal-save').addEventListener('click', async () => {
     name: $('#f-name').value.trim(),
     category: $('#f-category').value,
     url: $('#f-url').value.trim(),
-    accounts: collectAccounts(),
     registeredAt: $('#f-registered').value,
     expiresAt: $('#f-expires').value,
     price: $('#f-price').value.trim(),
