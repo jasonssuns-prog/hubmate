@@ -1,6 +1,9 @@
 'use strict';
 
-const CATS = {
+/* 分类默认 7 个；登录/预览拿到服务端下发的分类后会被 setCats 替换，
+   之后新增的分类自动出现在筛选 chip、下拉框、卡片角标和首页分组里 */
+let CATS = {
+  fav:     { label: '收藏', icon: '★', cls: 't-fav' },
   checkin: { label: '每日签到', icon: '📅', cls: 't-checkin' },
   relay:   { label: '中转站/API', icon: '🔀', cls: 't-relay' },
   vps:     { label: 'VPS/服务器', icon: '🖥️', cls: 't-vps' },
@@ -8,6 +11,12 @@ const CATS = {
   domain:  { label: '域名/订阅', icon: '🌐', cls: 't-domain' },
   idle:    { label: '已闲置', icon: '🧟', cls: 't-idle' }
 };
+function setCats(list) {
+  if (!Array.isArray(list) || !list.length) return;
+  const next = {};
+  for (const c of list) next[c.id] = { label: c.label, icon: c.icon || '🏷️', cls: c.cls || 't-custom' };
+  CATS = next;
+}
 
 const YI = ['签到领奖励', '整理一遍台账', '检查 VPS 状态', '白嫖积分', '续费该续的', '注册个新的试试', '早点睡', '给账号改个强密码'];
 const JI = ['忘签到', '熬夜', '乱点链接', '乱花钱', '拖延症', '忘记续费'];
@@ -27,6 +36,14 @@ const QUOTES = [
 ];
 
 let mode = 'preview', me = null, services = [], meta = null, filter = 'all', q = '', editingId = null;
+/* 星标和分类是两回事，互不干涉：收藏栏只看星标，分类只决定它分在哪个组里。
+   选“收藏”分类保存时，服务器会在“新进收藏分类”那一刻顺带点上星，所以它会进收藏栏；
+   之后取消星标，只会让它离开收藏栏，分类保持不动。 */
+const isFav = (s) => !!(s && s.favorite);
+let gridFirstRender = true;
+/* 重型特效只在桌面细指针设备上开：触屏/小屏上粒子+光球是最大卡顿源 */
+/* 注意：reduceMotion 在文件后面才声明，这里不能提前引用它，否则整段脚本会在加载时直接报错、登录按钮和渲染全失效（2026-10-29 实测教训） */
+const heavyFx = matchMedia('(pointer: fine)').matches && innerWidth > 780;
 const live = () => mode === 'live';
 
 const $ = (sel) => document.querySelector(sel);
@@ -36,6 +53,25 @@ const RING_C = 2 * Math.PI * 52;
 function todayStr() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+/* v51：到期日自动填 = 开始时间 + 续期周期；365 天按加一年（2 月 29 日 → 2 月 28 日），与服务端续期口径一致 */
+function addDaysStr(ymd, days) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd || '');
+  if (!m || !Number.isFinite(days) || days < 1) return '';
+  const d = new Date(+m[1], +m[2] - 1, +m[3]);
+  if (days === 365) {
+    const t = new Date(d.getFullYear() + 1, d.getMonth(), d.getDate());
+    if (t.getMonth() !== d.getMonth()) t.setDate(0); // 2 月 29 日 → 2 月 28 日
+    return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
+  }
+  d.setDate(d.getDate() + days);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+let expiryDirty = false; // 本次弹窗里手动改过到期日，就不再自动填
+function autoFillExpires() {
+  if (expiryDirty) return;
+  const v = addDaysStr($('#f-registered').value, parseInt($('#f-renew-days').value, 10));
+  if (v) $('#f-expires').value = v;
 }
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -47,6 +83,38 @@ function daysUntil(dateStr) {
   const target = new Date(y, m - 1, d);
   const base = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   return Math.round((target - base) / 86400e3);
+}
+/* 签到间隔（天）：默认 1 天；老数据没这个字段也按 1 天算 */
+function everyDays(s) {
+  const n = parseInt(s.checkinEveryDays, 10);
+  return Number.isFinite(n) && n >= 1 ? Math.min(n, 365) : 1;
+}
+/* 续期周期（天）：默认 365 天；老数据没这个字段也按 365 天算 */
+function renewDaysOf(s) {
+  const n = parseInt(s.renewDays, 10);
+  return Number.isFinite(n) && n >= 1 ? Math.min(n, 3650) : 365;
+}
+/* 临期按钮文案：365 天显示“续一年”，其他显示“续 N 天” */
+function renewLabel(s) {
+  const d = renewDaysOf(s);
+  return d === 365 ? '续一年' : `续${d}天`;
+}
+/* 两个日期相差天数（b - a），按 UTC 日期算 */
+function dayDiff(a, b) {
+  const [ay, am, ad] = a.split('-').map(Number);
+  const [by, bm, bd] = b.split('-').map(Number);
+  return Math.round((Date.UTC(by, bm - 1, bd) - Date.UTC(ay, am - 1, ad)) / 86400e3);
+}
+/* 今天该不该签：没签过就是到期；上次签到距今满间隔天数才到期 */
+function dueToday(s, t) {
+  if (s.checkinFrequency !== 'daily' || s.category === 'idle') return false;
+  const c = (s.checkins || []).filter(Boolean).sort();
+  if (!c.length) return true;
+  return dayDiff(c[c.length - 1], t) >= everyDays(s);
+}
+/* 今日签到 cohort：今天到期 + 今天已签；不到期的服务不计入今日 */
+function todayCohort(s, t) {
+  return dueToday(s, t) || (s.checkins || []).includes(t);
 }
 function streak(dates) {
   const set = new Set(dates || []);
@@ -97,6 +165,27 @@ function toast(msg, type = '') {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { t.className = ''; }, 2400);
 }
+/* 点星微动画：从点击处迸出几颗小星星（挂在 body 上，列表重绘也冲不掉） */
+function starBurst(x, y, on) {
+  if (reduceMotion) return;
+  const chars = on ? ['★', '★', '✦'] : ['☆', '☆'];
+  const n = on ? 7 : 4;
+  for (let i = 0; i < n; i++) {
+    const s = document.createElement('span');
+    s.className = 'star-burst';
+    s.textContent = chars[i % chars.length];
+    s.style.left = `${x}px`;
+    s.style.top = `${y}px`;
+    s.style.color = on ? '#fbbf24' : '#94a3b8';
+    const ang = (Math.PI * 2 * i) / n + Math.random() * .5;
+    const dist = 26 + Math.random() * 30;
+    s.style.setProperty('--dx', `${Math.cos(ang) * dist}px`);
+    s.style.setProperty('--dy', `${Math.sin(ang) * dist - 14}px`);
+    s.style.setProperty('--rr', `${Math.floor(Math.random() * 120 - 60)}deg`);
+    document.body.appendChild(s);
+    setTimeout(() => s.remove(), 750);
+  }
+}
 function confetti(n = 70) {
   const colors = ['#5b8cff', '#22d3ee', '#34d399', '#fbbf24', '#f87171', '#c084fc', '#ffd479'];
   for (let i = 0; i < n; i++) {
@@ -111,9 +200,23 @@ function confetti(n = 70) {
     setTimeout(() => d.remove(), 3600);
   }
 }
+let captchaId = '';
+let captchaSeq = 0;
+async function loadCaptcha() {
+  /* 防乱序：打开登录框时的一次请求和紧接着点的“换一张”可能同时在飞，
+     只认最后一次请求的结果，旧请求晚到也不许把图换回去（否则看起来像换图没生效） */
+  const seq = ++captchaSeq;
+  try {
+    const r = await api('/api/captcha');
+    if (seq !== captchaSeq) return;
+    captchaId = r.id;
+    $('#l-captcha-img').innerHTML = r.svg;
+  } catch { /* 验证码加载失败时登录会由服务端报错，不阻塞打开登录框 */ }
+}
 function openLogin() {
   $('#l-err').classList.add('hidden');
   $('#login-overlay').classList.remove('hidden');
+  loadCaptcha();
   $('#l-user').focus();
 }
 function handleAuthErr(err) {
@@ -133,7 +236,12 @@ async function loadAll() {
   [services, meta] = await Promise.all([api('/api/services'), api('/api/meta')]);
   me = { username: meta.username };
   mode = 'live';
+  setCats(meta.categories);
   renderAll();
+  loadNotify();
+  loadNotes();
+  if (dupesScanned) scanDupes(); // 删/改后数据变了，重复列表跟着刷新
+  renderCats(); // 分类列表每次登录后都渲染，别再用“先触发后渲染”那套
 }
 async function loadPreview() {
   const pub = await fetch('/api/public').then((r) => { if (!r.ok) throw new Error('fail'); return r.json(); });
@@ -141,6 +249,7 @@ async function loadPreview() {
   meta = pub;
   me = { username: pub.username };
   mode = 'preview';
+  setCats(pub.categories);
   renderAll();
 }
 
@@ -153,7 +262,8 @@ function renderAll() {
 
   const d = new Date();
   const t = todayStr();
-  const daily = services.filter((s) => s.checkinFrequency === 'daily' && s.category !== 'idle');
+  /* v53：计数只算可计的（标记异常的不算全勤、不催），面板列表仍包含异常红显 */
+  const daily = services.filter((s) => todayCohort(s, t) && !s.abnormal);
   const done = daily.filter((s) => (s.checkins || []).includes(t)).length;
   const soon = services.filter((s) => s.expiresAt && daysUntil(s.expiresAt) <= 7).length;
   const best = Math.max(0, ...services.map((s) => maxRun(s.checkins)));
@@ -222,6 +332,8 @@ function renderAll() {
   $('#checkin-bar').style.width = daily.length ? `${(done / daily.length) * 100}%` : '0';
 
   renderBanner();
+  if (!live()) renderLanding();
+  else { renderFav(); renderExpiring(); }
   const sb = $('#sec-banner');
   if (live() && meta.passwordIsDefault) {
     sb.innerHTML = '🔒 当前还是初始默认密码，部署到服务器前务必点右上角「改密码」换掉！';
@@ -252,25 +364,28 @@ function renderBanner() {
 }
 
 function renderCheckin() {
-  const list = services.filter((s) => s.checkinFrequency === 'daily' && s.category !== 'idle');
+  const t = todayStr();
+  const list = services.filter((s) => todayCohort(s, t));
+  /* v49：未签的上浮、已签的下沉，点完自动流动；同组内保持原顺序
+     v53：标记异常的沉到底（不算待签，不占上面位置） */
+  list.sort((a, b) => ((a.abnormal ? 2 : (a.checkins || []).includes(t) ? 1 : 0)) - ((b.abnormal ? 2 : (b.checkins || []).includes(t) ? 1 : 0)));
   const box = $('#checkin-list');
   if (!list.length) {
-    box.innerHTML = `<div class="empty">还没有需要每日签到的服务。${live() ? '点右上角「➕ 添加服务」，把「签到频率」设为「每天」就会出现在这里。' : '登录后添加，把「签到频率」设为「每天」即可。'}</div>`;
+    box.innerHTML = `<div class="empty">今天没有需要签到的服务。${live() ? '点右上角「➕ 添加服务」，把「签到频率」设为「每天」就会按周期出现在这里。' : '登录后添加，把「签到频率」设为「每天」即可。'}</div>`;
     return;
   }
-  const t = todayStr();
   box.innerHTML = list.map((s) => {
     const ok = (s.checkins || []).includes(t);
     const st = streak(s.checkins);
     const last = (s.checkins || []).length ? s.checkins[s.checkins.length - 1] : '从未签到';
     const right = live()
       ? (ok
-        ? `<button class="btn ok" data-act="uncheckin" data-id="${s.id}" title="点一下可撤销今天的签到">✓ 今日已签</button>`
+        ? `<span class="signed-tag">✓ 今日已签</span><button class="btn ghost" data-act="uncheckin" data-id="${s.id}">↩ 撤回</button>`
         : `<button class="btn primary" data-act="checkin" data-id="${s.id}">签到 +5⚡</button>`)
       : `<button class="btn ghost" data-act="wantlogin">🔒 登录后签到</button>`;
-    return `<div class="checkin-row">
+    return `<div class="checkin-row${s.abnormal ? ' abnormal' : ''}">
       <div class="ci-info">
-        <div class="ci-name">${esc(s.name)} ${st ? `<span class="chip fire">🔥 连续${st}天</span>` : ''}</div>
+        <div class="ci-name">${esc(s.name)} ${s.abnormal ? '<span class="chip abn">⚠️ 异常</span>' : ''}${st ? `<span class="chip fire">🔥 连续${st}天</span>` : ''}</div>
         <div class="ci-sub">${s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.url)}</a>` : '未填网址'} · 上次：${esc(last)}</div>
       </div>
       ${right}
@@ -321,13 +436,15 @@ function renderChips() {
   const mk = (key, label, count) =>
     `<button class="chip ${filter === key ? 'on' : ''}" data-cat="${key}">${label} <i>${count}</i></button>`;
   let html = mk('all', '全部', services.length);
-  for (const [k, v] of Object.entries(CATS)) html += mk(k, `${v.icon} ${v.label}`, counts[k] || 0);
+  html += mk('fav', '★ 我的收藏', services.filter(isFav).length);
+  /* “收藏”分类不单独再出一个筛选 chip：上面的“我的收藏”已经按统一口径（星标或收藏分类）汇总，避免两个同功能按钮 */
+  for (const [k, v] of Object.entries(CATS)) if (k !== 'fav') html += mk(k, `${v.icon} ${v.label}`, counts[k] || 0);
   $('#chips').innerHTML = html;
 }
 
 function cardBold(s) {
   if (s.notes) return s.notes.split(/\r?\n/)[0];
-  if (s.checkinFrequency === 'daily') return '每日签到送奖励，坚持别断';
+  if (s.checkinFrequency === 'daily') return everyDays(s) > 1 ? `每${everyDays(s)}天签到送奖励，坚持别断` : '每日签到送奖励，坚持别断';
   if (s.expiresAt) {
     const d = daysUntil(s.expiresAt);
     return `到期 ${s.expiresAt}${d !== null ? `（剩 ${d} 天）` : ''}`;
@@ -360,19 +477,26 @@ function cardHTML(s, idx) {
 
   const actions = live()
     ? `<div class="card-acts">
+        ${bulkMode ? `<input type="checkbox" class="bulk-check" data-bulk-id="${s.id}" ${bulkSel.has(s.id) ? 'checked' : ''}>` : ''}
+        <button class="btn small ghost fav-btn${isFav(s) ? ' on' : ''}" data-act="fav" data-id="${s.id}" title="收藏 / 取消收藏">${isFav(s) ? '★ 已收藏' : '☆ 收藏'}</button>
         ${s.checkinFrequency === 'daily' && s.category !== 'idle'
-          ? `<button class="btn small ${checkedToday ? 'ok' : 'primary'}" data-act="${checkedToday ? 'uncheckin' : 'checkin'}" data-id="${s.id}">${checkedToday ? '✓ 已签' : '签到'}</button>` : ''}
+          ? (checkedToday
+            ? `<button class="btn small ok" data-act="uncheckin" data-id="${s.id}">↩ 撤回</button>`
+            : (dueToday(s, todayStr())
+              ? `<button class="btn small primary" data-act="checkin" data-id="${s.id}">签到</button>` : '')) : ''}
         <button class="btn small ghost" data-act="edit" data-id="${s.id}">编辑</button>
+        <button class="btn small ghost" data-act="move-up" data-id="${s.id}" title="上移">↑</button>
+        <button class="btn small ghost" data-act="move-down" data-id="${s.id}" title="下移">↓</button>
         <button class="btn small ghost" data-act="del" data-id="${s.id}">删除</button>
       </div>`
     : (s.checkinFrequency === 'daily' && s.category !== 'idle'
       ? `<div class="card-acts"><button class="btn small ghost" data-act="wantlogin">🔒 登录后签到</button></div>` : '');
 
-  return `<div class="card" data-id="${s.id}">
+  return `<div class="card${s.abnormal ? ' abnormal' : ''}" data-id="${s.id}">
     <span class="ghost-num">${num}</span>
     <div class="c-head">
       <span class="cat-pill ${cat.cls}"><i></i>${cat.icon} ${cat.label}</span>
-      <span class="c-badges">${s.visits ? `<span class="badge b-visit" title="累计访问 ${s.visits} 次">👆 ${s.visits}</span>` : ''}${exp}${st ? `<span class="badge b-fire">🔥 连${st}天</span>` : ''}${checkedToday ? '<span class="badge b-ok">今日已签</span>' : ''}</span>
+      <span class="c-badges">${isFav(s) ? '<span class="badge b-fav">★ 收藏</span>' : ''}${s.abnormal ? '<span class="badge b-bad">⚠️ 异常</span>' : ''}${s.visits ? `<span class="badge b-visit" title="累计访问 ${s.visits} 次">👆 ${s.visits}</span>` : ''}${exp}${s.linkStatus === 'dead' ? '<span class="badge b-bad" title="最近一次检测打不开">⚠️ 疑似失效</span>' : ''}${st ? `<span class="badge b-fire">🔥 连${st}天</span>` : ''}${checkedToday ? '<span class="badge b-ok">今日已签</span>' : ''}</span>
     </div>
     <div class="c-title">${s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener" data-visit="${s.id}">${esc(s.name)} <span class="arrow">↗</span></a>` : esc(s.name)}</div>
     <div class="c-desc">${esc(bold)}</div>
@@ -386,7 +510,8 @@ function cardHTML(s, idx) {
 function renderGrid() {
   const kw = q.trim().toLowerCase();
   const list = services.filter((s) => {
-    if (filter !== 'all' && s.category !== filter) return false;
+    if (filter === 'fav' && !isFav(s)) return false;
+    if (filter !== 'all' && filter !== 'fav' && s.category !== filter) return false;
     if (kw) {
       const hay = `${s.name} ${s.account || ''} ${s.url} ${s.notes} ${s.secret || ''}`.toLowerCase();
       if (!hay.includes(kw)) return false;
@@ -398,41 +523,247 @@ function renderGrid() {
     grid.innerHTML = `<div class="empty">没有匹配的服务。${live() ? '点「➕ 添加服务」把它们都记下来吧。' : '登录后就可以记录了。'}</div>`;
     return;
   }
-  const groups = filter === 'all' ? Object.keys(CATS) : [filter];
+  const groups = (filter === 'all' || filter === 'fav') ? Object.keys(CATS) : [filter];
+  /* v48：搜索时强制全展开，不把搜到的卡片藏在收起的组里 */
+  const collapsedCats = kw ? new Set() : loadCollapsedCats();
   let html = '', counter = 0;
   for (const cat of groups) {
     const items = list.filter((s) => s.category === cat);
     if (!items.length) continue;
-    html += `<h2 class="sec-title">${CATS[cat].icon} ${CATS[cat].label} <i>${items.length}</i></h2><div class="cards">`;
+    const isCol = collapsedCats.has(cat);
+    html += `<h2 class="sec-title${isCol ? ' collapsed' : ''}" data-cat="${esc(cat)}"><span class="sec-arrow">${isCol ? '▸' : '▾'}</span>${CATS[cat].icon} ${CATS[cat].label} <i>${items.length}</i></h2><div class="cards${isCol ? ' hidden' : ''}">`;
     html += items.map((s) => cardHTML(s, counter++)).join('');
     html += '</div>';
   }
   grid.innerHTML = html;
-  /* 入场交错动画 + 登录后可拖拽排序 */
+  /* 入场交错动画只做一次：搜索/筛选时再逐张淡入会感觉很卡 */
   const searching = document.activeElement === $('#search');
   grid.querySelectorAll('.card').forEach((el, i) => {
     el.draggable = live();
-    if (!searching && !reduceMotion) {
+    if (!searching && !reduceMotion && gridFirstRender) {
       el.style.animationDelay = `${Math.min(i * 45, 450)}ms`;
       el.classList.add('reveal-in');
     }
   });
+  gridFirstRender = false;
 }
 
+/* ---------- 收藏按分类分组：按 CATS 顺序出组，不在 CATS 里的归“其他” ---------- */
+function favGroups(favs) {
+  const groups = [];
+  for (const [id, c] of Object.entries(CATS)) {
+    const items = favs.filter((s) => s.category === id);
+    if (items.length) groups.push({ title: `${c.icon} ${c.label}`, items });
+  }
+  const rest = favs.filter((s) => !CATS[s.category]);
+  if (rest.length) groups.push({ title: '📦 其他', items: rest });
+  return groups;
+}
+function landingSiteCard(s, star) {
+  const host = (() => { try { return new URL(s.url).hostname; } catch { return s.url || ''; } })();
+  return `<a class="landing-site" href="${esc(s.url || '#')}" target="_blank" rel="noopener"><b>${star ? '★ ' : ''}${esc(s.name)}</b><i>${esc(host)}</i><span>${CATS[s.category]?.label || s.category}</span><span class="go">直达 ↗</span></a>`;
+}
+
+/* ---------- 登录前落地页：只渲染今日签到 + 我的网站 ---------- */
+function renderLanding() {
+  const t = todayStr();
+  const daily = services.filter((s) => todayCohort(s, t));
+  /* v53：落地统计只算可计的，异常不占分母；列表仍含异常红显 */
+  const countable = daily.filter((s) => !s.abnormal);
+  const done = countable.filter((s) => (s.checkins || []).includes(t)).length;
+  const doneEl = $('#lf-done');
+  if (doneEl) doneEl.textContent = `${done}/${countable.length}`;
+  const streakEl = $('#lf-streak');
+  if (streakEl) streakEl.textContent = `${Math.max(0, ...services.map((s) => maxRun(s.checkins)))} 天`;
+  const sitesEl = $('#lf-sites');
+  if (sitesEl) sitesEl.textContent = services.length;
+  const bar = $('#landing-checkin-bar');
+  if (bar) bar.style.width = countable.length ? `${(done / countable.length) * 100}%` : '0';
+  const ccEl = $('#landing-checkin-count');
+  if (ccEl) ccEl.textContent = countable.length ? `${done}/${countable.length}` : '';
+  const list = $('#landing-checkin-list');
+  if (list) {
+    list.innerHTML = daily.length
+      ? daily.map((s) => {
+          const ok = (s.checkins || []).includes(t);
+          return `<div class="landing-checkin-item${ok ? ' done' : ''}${s.abnormal ? ' abnormal' : ''}"><span class="ck ${ok ? 'done' : 'todo'}">${ok ? '✓' : ''}</span><span class="ck-name">${s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.name)}</a>` : esc(s.name)}</span><span class="ck-note">${ok ? '今日已签' : (s.abnormal ? '⚠️ 异常，暂时签到不了' : '登录后可签到')}</span></div>`;
+        }).join('')
+      : '<div class="empty">还没有需要每日签到的服务。</div>';
+  }
+  const favGrid = $('#landing-fav-grid');
+  if (favGrid) {
+    const favs = [...services].filter(isFav).sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
+    const fcEl = $('#landing-fav-count');
+    if (fcEl) fcEl.textContent = favs.length ? `${favs.length}` : '';
+    favGrid.innerHTML = favs.length
+      ? favGroups(favs).map((g) => `<div class="landing-fav-group"><div class="fav-group-title">${esc(g.title)} <i>${g.items.length}</i></div><div class="landing-sites">${g.items.map((s) => landingSiteCard(s, true)).join('')}</div></div>`).join('')
+      : '<div class="empty">还没有收藏。登录后在服务卡片上点 ☆ 收藏，或添加服务时选“收藏”分类，都会归拢到这里。</div>';
+  }
+  const grid = $('#landing-sites-grid');
+  if (grid) {
+    const sorted = [...services].sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
+    /* 落地页搜索：只过滤“我的网站”网格（签到、收藏区和滚动条不受影响） */
+    const kw = ($('#landing-search')?.value || '').trim().toLowerCase();
+    const shown = kw
+      ? sorted.filter((s) => {
+          const host = (() => { try { return new URL(s.url).hostname; } catch { return s.url || ''; } })();
+          return `${s.name} ${s.url || ''} ${host} ${CATS[s.category]?.label || s.category}`.toLowerCase().includes(kw);
+        })
+      : sorted;
+    const scEl = $('#landing-sites-count');
+    if (scEl) scEl.textContent = shown.length ? `${shown.length}` : '';
+    /* 首页滚动条：网站名横向慢速滚动，点击名字直达（内容复制两份实现无缝循环） */
+    const track = $('#landing-ticker-track');
+    if (track) {
+      const units = sorted.map((s) => `<a href="${esc(s.url || '#')}" target="_blank" rel="noopener">${esc(s.name)}</a><span class="tk-dot">✦</span>`).join('');
+      track.innerHTML = units ? units + units : '';
+      track.closest('.landing-ticker').style.display = units ? '' : 'none';
+    }
+    grid.innerHTML = shown.length
+      ? `<div class="landing-sites">${shown.map((s) => {
+          const host = (() => { try { return new URL(s.url).hostname; } catch { return s.url || ''; } })();
+          return `<a class="landing-site" href="${esc(s.url || '#')}" target="_blank" rel="noopener"><b>${isFav(s) ? '★ ' : ''}${esc(s.name)}</b><i>${esc(host)}</i><span>${CATS[s.category]?.label || s.category}</span><span class="go">直达 ↗</span></a>`;
+        }).join('')}</div>`
+      : (kw ? '<div class="empty">没有匹配的网站，换个关键词试试。</div>' : '<div class="empty">还没有收录网站，登录后添加。</div>');
+  }
+  /* 渲染完再量一次：框内装不下时才显示滚动提示 */
+  requestAnimationFrame(checkLandingScroll);
+}
+
+/* 首页框内滚动提示：内容超出框高时才显示“框内滚动查看全部” */
+function checkLandingScroll() {
+  [['landing-checkin-list', 'landing-checkin-hint'], ['landing-fav-grid', 'landing-fav-hint'], ['landing-sites-grid', 'landing-sites-hint']].forEach(([listId, hintId]) => {
+    const el = document.getElementById(listId), hint = document.getElementById(hintId);
+    if (el && hint) hint.classList.toggle('hidden', el.scrollHeight <= el.clientHeight + 4);
+  });
+}
+let landingScrollTimer = null;
+addEventListener('resize', () => {
+  clearTimeout(landingScrollTimer);
+  landingScrollTimer = setTimeout(checkLandingScroll, 150);
+});
+
+/* ---------- 收藏管理专区（仅登录后） ---------- */
+function renderFav() {
+  const box = $('#fav-list');
+  if (!box) return;
+  const favs = [...services].filter(isFav).sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
+  const count = $('#fav-count');
+  if (count) count.textContent = `共 ${favs.length} 个收藏`;
+  box.innerHTML = favs.length
+    ? favGroups(favs).map((g) => `<div class="fav-group-title">${esc(g.title)} <i>${g.items.length}</i></div>${g.items.map((s) => {
+        const host = (() => { try { return new URL(s.url).hostname; } catch { return s.url || ''; } })();
+        return `<div class="landing-checkin-item"><span class="ck">★</span><span class="ck-name">${s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.name)}</a>` : esc(s.name)}</span><span class="ck-note">${esc(CATS[s.category]?.label || s.category)} · ${esc(host)}</span><button class="btn small ghost" data-act="fav" data-id="${s.id}">取消收藏</button></div>`;
+      }).join('')}`).join('')
+    : '<div class="empty">还没有收藏。在下面服务台账的卡片上点 ☆ 收藏，或点“添加服务”/“编辑”时勾选收藏、选“收藏”分类，就会集中到这里。</div>';
+}
+
+/* ---------- 临期提醒专区（仅登录后，30 天内到期含已过期） ---------- */
+function renderExpiring() {
+  const box = $('#expiring-list');
+  if (!box) return;
+  const items = services
+    .filter((s) => s.expiresAt)
+    .map((s) => ({ s, d: daysUntil(s.expiresAt) }))
+    .filter((x) => x.d <= 30)
+    .sort((a, b) => a.d - b.d);
+  const navCount = $('#expiring-nav-count');
+  if (navCount) navCount.textContent = items.length ? items.length : '';
+  const count = $('#expiring-count');
+  if (count) count.textContent = items.length ? `共 ${items.length} 个临期` : '';
+  box.innerHTML = items.length
+    ? items.map(({ s, d }) => {
+        const host = (() => { try { return new URL(s.url).hostname; } catch { return s.url || ''; } })();
+        const badge = d < 0
+          ? `<span class="exp-badge overdue">已过期 ${-d} 天</span>`
+          : (d === 0 ? '<span class="exp-badge overdue">今天到期</span>'
+          : (d <= 7 ? `<span class="exp-badge soon">${d} 天后到期</span>`
+          : `<span class="exp-badge later">${d} 天后到期</span>`));
+        return `<div class="landing-checkin-item"><span class="ck">⏰</span><span class="ck-name">${s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.name)}</a>` : esc(s.name)}</span><span class="ck-note">${esc(CATS[s.category]?.label || s.category)} · 到期 ${esc(s.expiresAt)}${host ? ` · ${esc(host)}` : ''}</span>${badge}<button class="btn small ghost" data-act="renew" data-id="${s.id}">${renewLabel(s)}</button><button class="btn small ghost" data-act="edit" data-id="${s.id}">编辑</button>${(s.prevRenew || s.prevExpiresAt) ? `<button class="btn small ghost" data-act="undo-renew" data-id="${s.id}">↩ 撤回续期</button>` : ''}</div>`;
+      }).join('')
+    : '<div class="empty">太好了，30 天内没有要到期的服务。</div>';
+}
+
+/* ---------- Telegram 通知设置 ---------- */
+async function loadNotify() {
+  try {
+    const n = await api('/api/notify');
+    $('#n-chat').value = n.chatId || '';
+    $('#n-expiring').checked = n.expiring !== false;
+    $('#n-checkin').checked = n.checkin !== false;
+    $('#n-pushhour').value = (n.pushHour === undefined ? 9 : n.pushHour);
+    $('#n-repeat').value = (n.repeatHours === undefined ? 0 : n.repeatHours);
+    $('#notify-status').textContent = n.configured ? '已配置' : '未配置';
+  } catch { /* 未登录时不打扰 */ }
+}
+/* 反馈一眼可见：成功绿色、失败红色，不再是一行不起眼的灰字 */
+function notifyMsg(text, ok) {
+  const msg = $('#notify-msg');
+  msg.textContent = text;
+  msg.style.color = ok ? '#34d399' : '#f87171';
+}
+$('#btn-notify-save').addEventListener('click', async () => {
+  const b = $('#btn-notify-save');
+  if (b.disabled) return;
+  b.disabled = true;
+  try {
+    await api('/api/notify', { method: 'POST', body: JSON.stringify({ token: $('#n-token').value, chatId: $('#n-chat').value, expiring: $('#n-expiring').checked, checkin: $('#n-checkin').checked, pushHour: $('#n-pushhour').value, repeatHours: $('#n-repeat').value }) });
+    $('#n-token').value = '';
+    notifyMsg('已保存。', true);
+    loadNotify();
+  } catch (e) { notifyMsg(e.message, false); }
+  finally { b.disabled = false; }
+});
+$('#btn-notify-resolve').addEventListener('click', async () => {
+  const b = $('#btn-notify-resolve');
+  if (b.disabled) return;
+  b.disabled = true;
+  try {
+    const r = await api('/api/notify/resolve', { method: 'POST' });
+    $('#n-chat').value = r.chatId;
+    notifyMsg(`已获取并保存 Chat ID：${r.chatId}`, true);
+    loadNotify();
+  } catch (e) { notifyMsg(e.message, false); }
+  finally { b.disabled = false; }
+});
+$('#btn-notify-test').addEventListener('click', async () => {
+  /* 防连点：测试消息连点会往 Telegram 发两条 */
+  const b = $('#btn-notify-test');
+  if (b.disabled) return;
+  b.disabled = true;
+  const oldText = b.textContent;
+  b.textContent = '发送中…';
+  try {
+    await api('/api/notify/test', { method: 'POST' });
+    notifyMsg('测试消息已发送，请去 Telegram 查看。', true);
+  } catch (e) { notifyMsg(e.message, false); }
+  finally { b.disabled = false; b.textContent = oldText; }
+});
+
 /* ---------- 弹窗 ---------- */
+function renderCatOptions() {
+  $('#f-category').innerHTML = Object.entries(CATS).map(([id, c]) => `<option value="${id}">${esc(c.icon)} ${esc(c.label)}</option>`).join('');
+}
 function openModal(svc) {
   editingId = svc ? svc.id : null;
   $('#modal-title').textContent = svc ? '编辑服务' : '添加服务';
   $('#f-name').value = svc?.name || '';
-  $('#f-category').value = svc?.category || 'relay';
+  renderCatOptions();
+  $('#f-category').value = (svc?.category && CATS[svc.category]) ? svc.category : 'relay';
   $('#f-url').value = svc?.url || '';
   $('#f-account').value = svc?.account || '';
   $('#f-secret').value = svc?.secret || '';
   $('#f-registered').value = svc?.registeredAt || todayStr();
   $('#f-expires').value = svc?.expiresAt || '';
+  expiryDirty = false; // 新开弹窗：到期日还没手动改过，可以自动填
   $('#f-price').value = svc?.price || '';
   $('#f-frequency').value = svc?.checkinFrequency || 'none';
+  $('#f-every-days').value = svc?.checkinEveryDays ?? 1;
+  $('#f-renew-days').value = svc?.renewDays ?? 365;
+  $('#f-every-days').disabled = ($('#f-frequency').value !== 'daily');
   $('#f-notes').value = svc?.notes || '';
+  $('#f-fav').checked = isFav(svc);
+  $('#f-abnormal').checked = !!svc?.abnormal;
   $('#overlay').classList.remove('hidden');
   $('#f-name').focus();
 }
@@ -440,6 +771,11 @@ function closeModal() {
   $('#overlay').classList.add('hidden');
   editingId = null;
 }
+
+/* v51：改开始时间或续期周期时自动填到期日；手动改过到期日则不覆盖 */
+$('#f-registered').addEventListener('change', autoFillExpires);
+$('#f-renew-days').addEventListener('change', autoFillExpires);
+$('#f-expires').addEventListener('input', () => { expiryDirty = true; });
 
 /* ---------- 事件 ---------- */
 document.body.addEventListener('click', async (e) => {
@@ -468,8 +804,28 @@ document.body.addEventListener('click', async (e) => {
   const act = btn.dataset.act;
   const id = btn.dataset.id;
 
+  /* 防连点：写数据的按钮点下去就禁用，直到请求 + 刷新完成；失败也恢复。
+     只拦真正写数据的动作，打开弹窗/登录/查看密钥这种纯前端动作不拦 */
+  const guarded = ['fav', 'checkin', 'uncheckin', 'renew', 'undo-renew', 'move-up', 'move-down', 'del'].includes(act);
+  if (guarded) btn.disabled = true;
   try {
     if (act === 'wantlogin') { openLogin(); return; }
+    if (act === 'fav') {
+      const svc = services.find((s) => s.id === id);
+      if (!svc) return;
+      /* 点星 / 取消星只改星标，绝不碰分类：收藏分类的服务取消收藏后，
+         只是不再显示在收藏栏，台账里仍在“收藏”分组下 */
+      const next = !isFav(svc);
+      const payload = { favorite: next };
+      await api(`/api/services/${id}`, { method: 'PUT', body: JSON.stringify(payload) });
+      svc.favorite = next;
+      starBurst(e.clientX, e.clientY, next);
+      renderGrid();
+      renderFav();
+      renderChips();
+      toast(next ? '★ 已收藏，首页可见' : '已取消收藏');
+      return;
+    }
     if (act === 'checkin' || act === 'uncheckin') {
       const r = await api(`/api/services/${id}/${act}`, { method: 'POST' });
       if (act === 'checkin') {
@@ -479,16 +835,38 @@ document.body.addEventListener('click', async (e) => {
           confetti(110);
           setTimeout(() => toast(`🏆 解锁成就：${r.unlocked.map((a) => `${a.icon} ${a.name}`).join('、')}（+10⚡）`, 'gold'), 1800);
         }
+      } else {
+        toast('已撤回今日签到');
       }
+      await loadAll();
+    } else if (act === 'renew') {
+      const r = await api(`/api/services/${id}/renew`, { method: 'POST' });
+      await loadAll();
+      toast(`已续到 ${r.expiresAt}`);
+    } else if (act === 'undo-renew') {
+      const r = await api(`/api/services/${id}/undo-renew`, { method: 'POST' });
+      await loadAll();
+      toast(`已撤回续期，恢复到 ${r.expiresAt}`);
+    } else if (act === 'move-up' || act === 'move-down') {
+      await api(`/api/services/${id}/move`, { method: 'POST', body: JSON.stringify({ dir: act === 'move-down' ? 'down' : 'up' }) });
       await loadAll();
     } else if (act === 'edit') {
       openModal(services.find((s) => s.id === id));
     } else if (act === 'del') {
       const svc = services.find((s) => s.id === id);
       if (confirm(`确定删除「${svc ? svc.name : ''}」？删除后不可恢复。`)) {
-        await api(`/api/services/${id}`, { method: 'DELETE' });
-        await loadAll();
-        toast('已删除');
+        /* 先让卡片淡出缩小，动画播完再真正删除；接口失败则把卡片恢复原样 */
+        const cardEl = btn.closest('.card');
+        if (cardEl) cardEl.classList.add('card-leaving');
+        await new Promise((r) => setTimeout(r, 280));
+        try {
+          await api(`/api/services/${id}`, { method: 'DELETE' });
+          await loadAll();
+          toast('已删除');
+        } catch (err) {
+          if (cardEl) cardEl.classList.remove('card-leaving');
+          handleAuthErr(err);
+        }
       }
     } else if (act === 'reveal') {
       const el = document.querySelector(`[data-secret-id="${id}"]`);
@@ -498,38 +876,47 @@ document.body.addEventListener('click', async (e) => {
       }
     }
   } catch (err) { handleAuthErr(err); }
+  finally { if (guarded) btn.disabled = false; }
+});
+
+/* 签到频率切到“不签到”时，间隔输入框禁用（反之恢复） */
+$('#f-frequency').addEventListener('change', () => {
+  $('#f-every-days').disabled = ($('#f-frequency').value !== 'daily');
 });
 
 $('#btn-check-all').addEventListener('click', async () => {
   const t = todayStr();
-  const todo = services.filter((s) => s.checkinFrequency === 'daily' && s.category !== 'idle' && !(s.checkins || []).includes(t));
+  const todo = services.filter((s) => dueToday(s, t) && !s.abnormal);
   if (!todo.length) return;
   const btn = $('#btn-check-all');
   btn.disabled = true;
   btn.textContent = '签到中…';
-  let sum = 0, unlocked = [], allDone = false;
-  for (const s of todo) {
-    try {
-      const r = await api(`/api/services/${s.id}/checkin`, { method: 'POST' });
-      sum += r.xpGained || 0;
-      if (r.unlocked && r.unlocked.length) unlocked.push(...r.unlocked);
-      allDone = r.allDone || allDone;
-    } catch {}
+  /* 服务端一次签完：原来是逐个请求，签一半断网会留一半 */
+  try {
+    const r = await api('/api/checkins/all', { method: 'POST' });
+    await loadAll();
+    toast(`⚡ 一键全签完成，共 +${r.xpGained || 0} 热情值！`, 'gold');
+    if ((r.unlocked && r.unlocked.length) || r.allDone) confetti(120);
+  } catch (err) {
+    /* 失败也要把按钮恢复，别卡在“签到中…” */
+    btn.disabled = false;
+    btn.textContent = '⚡ 一键全签';
+    handleAuthErr(err);
   }
-  await loadAll();
-  toast(`⚡ 一键全签完成，共 +${sum} 热情值！`, 'gold');
-  if (unlocked.length || allDone) confetti(120);
 });
 
+$('#l-captcha-refresh').addEventListener('click', loadCaptcha);
+$('#l-captcha-img').addEventListener('click', loadCaptcha);
 $('#login-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   $('#l-err').classList.add('hidden');
   try {
     me = await api('/api/login', {
       method: 'POST',
-      body: JSON.stringify({ username: $('#l-user').value.trim(), password: $('#l-pass').value })
+      body: JSON.stringify({ username: $('#l-user').value.trim(), password: $('#l-pass').value, captchaId, captcha: $('#l-captcha').value })
     });
     $('#l-pass').value = '';
+    $('#l-captcha').value = '';
     $('#login-overlay').classList.add('hidden');
     await loadAll();
     confetti(60);
@@ -537,11 +924,20 @@ $('#login-form').addEventListener('submit', async (e) => {
   } catch (err) {
     $('#l-err').textContent = err.message;
     $('#l-err').classList.remove('hidden');
+    /* 验证码一次性作废：任何一次登录失败都换一张，旧图再填也无效 */
+    $('#l-captcha').value = '';
+    loadCaptcha();
   }
 });
 
 $('#btn-login').addEventListener('click', openLogin);
 $('#btn-hero-login').addEventListener('click', openLogin);
+const landingLogin = $('#landing-login');
+if (landingLogin) landingLogin.addEventListener('click', openLogin);
+const landingHeroLogin = $('#landing-hero-login');
+if (landingHeroLogin) landingHeroLogin.addEventListener('click', openLogin);
+const landingFootLogin = $('#landing-foot-login');
+if (landingFootLogin) landingFootLogin.addEventListener('click', openLogin);
 $('#login-cancel').addEventListener('click', () => $('#login-overlay').classList.add('hidden'));
 $('#login-overlay').addEventListener('click', (e) => { if (e.target === e.currentTarget) $('#login-overlay').classList.add('hidden'); });
 
@@ -569,31 +965,57 @@ $('#modal-save').addEventListener('click', async () => {
     expiresAt: $('#f-expires').value,
     price: $('#f-price').value.trim(),
     checkinFrequency: $('#f-frequency').value,
-    notes: $('#f-notes').value.trim()
+    checkinEveryDays: Math.min(365, Math.max(1, parseInt($('#f-every-days').value, 10) || 1)),
+    renewDays: Math.min(3650, Math.max(1, parseInt($('#f-renew-days').value, 10) || 365)),
+    notes: $('#f-notes').value.trim(),
+    favorite: $('#f-fav').checked,
+    abnormal: $('#f-abnormal').checked
   };
+  /* 星标和分类互不干涉：收藏分类 + 没勾星是合法组合（分在收藏组，但不在收藏栏），
+     保存时不再强制把分类改回中转站 */
   if (!f.name) return toast('名称必填', 'bad');
+  /* 防连点：新增时连点会建出多个服务，点下去就禁用，请求完恢复 */
+  const saveBtn = $('#modal-save');
+  if (saveBtn.disabled) return;
+  saveBtn.disabled = true;
+  const oldText = saveBtn.textContent;
+  saveBtn.textContent = '保存中…';
   try {
     let r;
+    const savedIdBefore = isEdit ? editingId : null;
     if (isEdit) r = await api(`/api/services/${editingId}`, { method: 'PUT', body: JSON.stringify(f) });
     else r = await api('/api/services', { method: 'POST', body: JSON.stringify(f) });
     closeModal();
     await loadAll();
+    /* 保存微动画：平滑滑到刚保存的那张卡片并闪光提示（被筛选掉时找不到卡片就跳过） */
+    const savedId = savedIdBefore || r?.id;
+    const savedEl = savedId ? document.querySelector(`.card[data-id="${savedId}"]`) : null;
+    if (savedEl) {
+      savedEl.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'center' });
+      savedEl.classList.add('card-flash');
+      setTimeout(() => savedEl.classList.remove('card-flash'), 1500);
+    }
     if (!isEdit) {
       toast(`已添加，记录新服务 +10⚡`, 'gold');
       if (r.unlocked && r.unlocked.length) { confetti(100); setTimeout(() => toast(`🏆 解锁成就：${r.unlocked.map((a) => `${a.icon} ${a.name}`).join('、')}`, 'gold'), 1200); }
     } else toast('已保存');
   } catch (err) { handleAuthErr(err); }
+  finally { saveBtn.disabled = false; saveBtn.textContent = oldText; }
 });
 
 $('#pass-save').addEventListener('click', async () => {
   const o = $('#p-old').value, n = $('#p-new').value, n2 = $('#p-new2').value;
   if (n !== n2) return toast('两次新密码不一致', 'bad');
+  const psBtn = $('#pass-save');
+  if (psBtn.disabled) return;
+  psBtn.disabled = true;
   try {
     await api('/api/password', { method: 'POST', body: JSON.stringify({ oldPassword: o, newPassword: n }) });
     $('#pass-overlay').classList.add('hidden');
     ['p-old', 'p-new', 'p-new2'].forEach((id) => { $('#' + id).value = ''; });
     toast('密码已修改');
   } catch (err) { handleAuthErr(err); }
+  finally { psBtn.disabled = false; }
 });
 
 $('#btn-export').addEventListener('click', async () => {
@@ -612,6 +1034,199 @@ $('#btn-backup').addEventListener('click', () => {
   a.remove();
   toast('备份已开始下载');
 });
+/* 从备份恢复：先在页面上确认，服务端还会先自动存一份当前数据 */
+$('#btn-restore').addEventListener('click', () => $('#restore-file').click());
+$('#restore-file').addEventListener('change', async (e) => {
+  const f = e.target.files[0];
+  e.target.value = '';
+  if (!f) return;
+  let j;
+  try { j = JSON.parse(await f.text()); } catch { toast('这个文件不是合法的 JSON', 'bad'); return; }
+  const inner = j.data || j;
+  const count = Array.isArray(inner.services) ? inner.services.length : 0;
+  if (!count) { toast('备份文件里没有服务列表', 'bad'); return; }
+  if (!confirm(`确定用这个备份恢复吗？会把现有 ${services.length} 个服务替换成备份里的 ${count} 个（当前数据会先自动备份到服务器，账号密码和机器人 Token 不变）。`)) return;
+  try {
+    const r = await api('/api/backup', { method: 'POST', body: JSON.stringify({ data: inner }) });
+    await loadAll();
+    toast(`已恢复，共 ${r.services} 个服务`);
+  } catch (err) { handleAuthErr(err); }
+});
+
+/* ---------- 批量操作：勾选卡片，一次改分类或删除 ---------- */
+let bulkMode = false;
+const bulkSel = new Set();
+function updateBulkCount() {
+  const el = $('#bulk-count');
+  if (el) el.textContent = bulkSel.size ? `已选 ${bulkSel.size} 个` : '还没选';
+}
+function setBulkMode(on) {
+  bulkMode = on;
+  if (!on) bulkSel.clear();
+  $('#bulk-bar').classList.toggle('hidden', !on);
+  $('#btn-bulk').textContent = on ? '☑️ 退出批量' : '☑️ 批量';
+  if (on) {
+    $('#bulk-cat').innerHTML = Object.entries(CATS).map(([id, c]) => `<option value="${id}">${esc(c.icon)} ${esc(c.label)}</option>`).join('');
+  }
+  updateBulkCount();
+  renderGrid();
+}
+$('#btn-bulk').addEventListener('click', () => setBulkMode(!bulkMode));
+$('#btn-bulk-exit').addEventListener('click', () => setBulkMode(false));
+$('#btn-bulk-all').addEventListener('click', () => {
+  const ids = [...document.querySelectorAll('#grid .card')].map((el) => el.dataset.id);
+  const allSelected = ids.length && ids.every((id) => bulkSel.has(id));
+  for (const id of ids) { if (allSelected) bulkSel.delete(id); else bulkSel.add(id); }
+  document.querySelectorAll('#grid .bulk-check').forEach((cb) => { cb.checked = bulkSel.has(cb.dataset.bulkId); });
+  updateBulkCount();
+});
+$('#btn-bulk-move').addEventListener('click', async () => {
+  if (!bulkSel.size) { toast('先勾选要移动的服务', 'bad'); return; }
+  const b = $('#btn-bulk-move');
+  if (b.disabled) return;
+  b.disabled = true;
+  try {
+    const r = await api('/api/services/bulk', { method: 'POST', body: JSON.stringify({ ids: [...bulkSel], action: 'category', category: $('#bulk-cat').value }) });
+    bulkSel.clear();
+    updateBulkCount();
+    await loadAll();
+    toast(`已移动 ${r.moved} 个服务`);
+  } catch (err) { handleAuthErr(err); }
+  finally { b.disabled = false; }
+});
+$('#btn-bulk-del').addEventListener('click', async () => {
+  if (!bulkSel.size) { toast('先勾选要删除的服务', 'bad'); return; }
+  if (!confirm(`确定删除选中的 ${bulkSel.size} 个服务？此操作不可撤销。`)) return;
+  const b = $('#btn-bulk-del');
+  if (b.disabled) return;
+  b.disabled = true;
+  try {
+    const r = await api('/api/services/bulk', { method: 'POST', body: JSON.stringify({ ids: [...bulkSel], action: 'delete' }) });
+    bulkSel.clear();
+    updateBulkCount();
+    await loadAll();
+    toast(`已删除 ${r.deleted} 个服务`);
+  } catch (err) { handleAuthErr(err); }
+  finally { b.disabled = false; }
+});
+
+$('#btn-linkcheck').addEventListener('click', async (e) => {
+  const btn = e.currentTarget;
+  btn.disabled = true;
+  btn.textContent = '检测中…';
+  try {
+    const r = await api('/api/linkcheck', { method: 'POST' });
+    await loadAll();
+    toast(r.dead ? `检测完成：${r.dead} 个疑似失效，已标在卡片上` : '检测完成：全部链接正常');
+  } catch (err) { handleAuthErr(err); }
+  btn.disabled = false;
+  btn.textContent = '🔗 检测链接';
+});
+
+/* ---------- 重复清理：同名 / 同域名分组，删完自动重扫 ---------- */
+let dupesScanned = false;
+function dupDomain(u) {
+  u = String(u || '').trim();
+  if (!u) return '';
+  if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
+  try { return new URL(u).hostname.replace(/^www\./i, '').toLowerCase(); } catch { return ''; }
+}
+function scanDupes() {
+  const box = $('#dupes-list');
+  if (!box) return;
+  dupesScanned = true;
+  const byName = new Map(), byDom = new Map();
+  for (const s of services) {
+    const nk = s.name.trim().toLowerCase();
+    if (nk) { if (!byName.has(nk)) byName.set(nk, []); byName.get(nk).push(s); }
+    const dk = dupDomain(s.url);
+    if (dk) { if (!byDom.has(dk)) byDom.set(dk, []); byDom.get(dk).push(s); }
+  }
+  const groups = [];
+  for (const [k, v] of byName) if (v.length > 1) groups.push({ title: `同名：${k}`, list: v });
+  for (const [k, v] of byDom) if (v.length > 1) groups.push({ title: `同域名：${k}`, list: v });
+  if (!groups.length) { box.innerHTML = '<p class="muted">没有发现重复服务。</p>'; return; }
+  box.innerHTML = groups.map((g) => `
+    <div class="panel-head" style="margin-top:14px"><h3 style="font-size:15px">${esc(g.title)}</h3><span class="muted">${g.list.length} 个</span></div>
+    ${g.list.map((s) => `<div class="landing-checkin-item"><span class="ck">♻️</span><span class="ck-name">${s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.name)}</a>` : esc(s.name)}</span><span class="ck-note">${esc(CATS[s.category]?.label || s.category)} · ${esc(dupDomain(s.url) || '')}</span><button class="btn small ghost" data-act="edit" data-id="${s.id}">编辑</button><button class="btn small ghost" data-dup-del="${s.id}">删除</button></div>`).join('')}
+  `).join('');
+}
+$('#btn-dup-scan').addEventListener('click', scanDupes);
+$('#dupes-list').addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-dup-del]');
+  if (!btn) return;
+  const id = btn.dataset.dupDel;
+  const svc = services.find((s) => s.id === id);
+  if (!confirm(`确定删除「${svc ? svc.name : ''}」？删除后不可恢复。`)) return;
+  btn.disabled = true;
+  try {
+    await api(`/api/services/${id}`, { method: 'DELETE' });
+    await loadAll();
+    toast('已删除');
+  } catch (err) { handleAuthErr(err); }
+  finally { btn.disabled = false; }
+});
+
+/* ---------- 分类管理：改名换图标直接在行内改，删完自动刷新 ---------- */
+const BUILTIN_CAT_IDS = ['fav', 'checkin', 'relay', 'vps', 'game', 'domain', 'idle'];
+/* 图标下拉的精选集：前 7 个是系统分类在用的，剩下的按用途排；
+   当前图标不在集里时（比如以前手填的）会把它补到最前面，免得下拉显示空白 */
+const ICON_OPTIONS = ['★', '📅', '🔀', '🖥️', '🎮', '🌐', '🧟', '💿', '📀', '💾', '🐧', '🛠️', '🔧', '⚙️', '🧰', '📦', '🌍', '🧭', '🔍', '📑', '📚', '📰', '🎬', '🎵', '📺', '🎨', '🖼️', '💰', '🛒', '🏦', '📧', '💬', '📱', '🔒', '🛡️', '🔑', '☁️', '🤖', '🚀', '⚡', '💻', '🎓', '💡', '📊', '📝', '🎁', '❤️', '⭐'];
+function iconOptions(selected) {
+  const opts = ICON_OPTIONS.includes(selected) ? ICON_OPTIONS : [selected, ...ICON_OPTIONS];
+  return opts.map((ic) => `<option value="${esc(ic)}"${ic === selected ? ' selected' : ''}>${esc(ic)}</option>`).join('');
+}
+function renderCats() {
+  const box = $('#cats-list');
+  if (!box || !live()) return;
+  const addSel = $('#c-icon');
+  if (addSel) addSel.innerHTML = iconOptions(addSel.value || ICON_OPTIONS[0]);
+  const counts = {};
+  for (const s of services) counts[s.category] = (counts[s.category] || 0) + 1;
+  box.innerHTML = Object.entries(CATS).map(([id, c]) => {
+    const builtin = BUILTIN_CAT_IDS.includes(id);
+    return `<div class="cat-row"><select class="cat-icon" data-id="${id}">${iconOptions(c.icon)}</select><input class="cat-name" data-id="${id}" value="${esc(c.label)}"><span class="muted">${counts[id] || 0} 个服务</span><button class="btn small ghost" data-cat-save="${id}">保存</button>${builtin ? '<span class="muted">系统分类</span>' : `<button class="btn small ghost" data-cat-del="${id}">删除</button>`}</div>`;
+  }).join('');
+}
+$('#btn-cat-add').addEventListener('click', async () => {
+  const label = $('#c-label').value.trim();
+  const icon = $('#c-icon').value;
+  if (!label) { toast('分类名不能为空', 'bad'); return; }
+  const b = $('#btn-cat-add');
+  if (b.disabled) return;
+  b.disabled = true;
+  try {
+    await api('/api/categories', { method: 'POST', body: JSON.stringify({ label, icon }) });
+    $('#c-label').value = '';
+    $('#c-icon').value = ICON_OPTIONS[0];
+    await loadAll();
+    toast('分类已添加');
+  } catch (err) { handleAuthErr(err); }
+  finally { b.disabled = false; }
+});
+$('#cats-list').addEventListener('click', async (e) => {
+  const saveBtn = e.target.closest('[data-cat-save]');
+  const delBtn = e.target.closest('[data-cat-del]');
+  const pressed = saveBtn || delBtn;
+  if (pressed) pressed.disabled = true;
+  try {
+    if (saveBtn) {
+      const id = saveBtn.dataset.catSave;
+      const row = saveBtn.closest('.cat-row');
+      await api(`/api/categories/${id}`, { method: 'PUT', body: JSON.stringify({ label: row.querySelector('.cat-name').value.trim(), icon: row.querySelector('.cat-icon').value }) });
+      await loadAll();
+      toast('已保存');
+    } else if (delBtn) {
+      const id = delBtn.dataset.catDel;
+      const c = CATS[id];
+      if (!confirm(`确定删除分类「${c ? c.label : ''}」？`)) return;
+      await api(`/api/categories/${id}`, { method: 'DELETE' });
+      await loadAll();
+      toast('已删除');
+    }
+  } catch (err) { handleAuthErr(err); }
+  finally { if (pressed) pressed.disabled = false; }
+});
 
 /* ESC 关闭所有弹窗 */
 document.addEventListener('keydown', (e) => {
@@ -621,7 +1236,13 @@ document.addEventListener('keydown', (e) => {
   $('#pass-overlay').classList.add('hidden');
 });
 
-$('#search').addEventListener('input', (e) => { q = e.target.value; renderGrid(); });
+/* 搜索防抖：每敲一下都全量重绘卡片是卡顿来源之一 */
+let searchTimer = null;
+$('#search').addEventListener('input', (e) => {
+  q = e.target.value;
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(renderGrid, 150);
+});
 
 /* ---------- 视觉特效 ---------- */
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -734,18 +1355,22 @@ function drawTrend() {
     if (p < 1) requestAnimationFrame(tick);
   });
 }
-addEventListener('resize', () => drawTrend());
+let trendTimer = null;
+addEventListener('resize', () => {
+  clearTimeout(trendTimer);
+  trendTimer = setTimeout(drawTrend, 150);
+});
 
 /* 星空粒子（canvas，主题三色 + 邻近连线） */
 (function starfield() {
   const cv = document.getElementById('fx');
-  if (!cv || reduceMotion) return;
+  if (!cv || !heavyFx || reduceMotion) return;
   const ctx = cv.getContext('2d');
   let W, H, pts;
   function resize() {
     W = cv.width = innerWidth;
     H = cv.height = innerHeight;
-    const n = Math.min(90, Math.floor(W * H / 22000));
+    const n = Math.min(50, Math.floor(W * H / 30000));
     pts = Array.from({ length: n }, () => ({
       x: Math.random() * W, y: Math.random() * H,
       vx: (Math.random() - .5) * .35, vy: (Math.random() - .5) * .35,
@@ -756,6 +1381,7 @@ addEventListener('resize', () => drawTrend());
   addEventListener('resize', resize);
   resize();
   requestAnimationFrame(function tick() {
+    if (document.hidden) { requestAnimationFrame(tick); return; }
     ctx.clearRect(0, 0, W, H);
     for (const p of pts) {
       p.x += p.vx; p.y += p.vy;
@@ -787,7 +1413,7 @@ addEventListener('resize', () => drawTrend());
 /* 鼠标跟随光球（screen 混合模式，柔光扫过页面） */
 (function cursorGlow() {
   const g = document.getElementById('cursor-glow');
-  if (!g || reduceMotion) return;
+  if (!g || !heavyFx || reduceMotion) return;
   let tx = innerWidth * .6, ty = innerHeight * .3, x = tx, y = ty;
   document.addEventListener('mousemove', (e) => { tx = e.clientX; ty = e.clientY; });
   requestAnimationFrame(function tick() {
@@ -812,6 +1438,367 @@ document.addEventListener('click', (e) => {
   setTimeout(() => rip.remove(), 650);
 });
 
+/* 展示页回到顶部：滚过 600px 才出现，滚动监听用 rAF 节流 */
+(function backToTop() {
+  const btn = $('#landing-to-top');
+  if (!btn) return;
+  let ticking = false, lastY = scrollY;
+  addEventListener('scroll', () => {
+    if (ticking) return;
+    ticking = true;
+    requestAnimationFrame(() => {
+      const y = scrollY, goingUp = y < lastY;
+      lastY = y;
+      /* v47：只有往上滑才出现，往下滑阅读时藏起来，不压正文 */
+      btn.classList.toggle('show', y > 600 && goingUp);
+      ticking = false;
+    });
+  }, { passive: true });
+  btn.addEventListener('click', () => scrollTo({ top: 0, behavior: reduceMotion ? 'auto' : 'smooth' }));
+})();
+
+/* ---------- v47 面板说明折叠（手机） ---------- */
+document.addEventListener('click', (e) => {
+  const t = e.target.closest('.help-toggle');
+  if (!t) return;
+  const f = t.closest('.help-fold');
+  if (!f) return;
+  f.classList.toggle('open');
+  t.textContent = f.classList.contains('open') ? '📖 说明 ▴' : '📖 说明 ▾';
+});
+
+/* ---------- v48 台账分类分组折叠（状态存浏览器） ---------- */
+function loadCollapsedCats() {
+  try { return new Set(JSON.parse(localStorage.getItem('hub-collapsed-cats') || '[]')); } catch { return new Set(); }
+}
+function saveCollapsedCats(set) {
+  try { localStorage.setItem('hub-collapsed-cats', JSON.stringify([...set])); } catch {}
+}
+document.addEventListener('click', (e) => {
+  const h = e.target.closest('#grid .sec-title');
+  if (!h) return;
+  const cards = h.nextElementSibling;
+  if (!cards || !cards.classList.contains('cards')) return;
+  const set = loadCollapsedCats();
+  const nowCollapsed = cards.classList.toggle('hidden');
+  h.classList.toggle('collapsed', nowCollapsed);
+  const arrow = h.querySelector('.sec-arrow');
+  if (arrow) arrow.textContent = nowCollapsed ? '▸' : '▾';
+  if (nowCollapsed) set.add(h.dataset.cat); else set.delete(h.dataset.cat);
+  saveCollapsedCats(set);
+});
+
+/* ---------- v48 弹窗更多设置折叠（手机） ---------- */
+document.addEventListener('click', (e) => {
+  const t = e.target.closest('.more-toggle');
+  if (!t) return;
+  const f = t.closest('.more-fold');
+  if (!f) return;
+  f.classList.toggle('open');
+  t.textContent = f.classList.contains('open') ? '⚙️ 更多设置：签到与续期规则 ▴' : '⚙️ 更多设置：签到与续期规则 ▾';
+});
+
+/* ---------- 极简 Markdown 渲染（仅展示用，存的还是纯文本，老记事不用迁移） ----------
+   顺序是关键：先转义 HTML，再把围栏代码块和行内代码抽成占位符（里面的 Markdown 不转），
+   行内格式转完、按行分块后，最后把占位符还原。链接只放行 http(s)/mailto/#，其余只留文字 */
+function renderMarkdown(src) {
+  const codeBlocks = [], codeSpans = [];
+  let text = esc(src);
+  text = text.replace(/```([\s\S]*?)(?:```|$)/g, (_, code) => {
+    let c = code;
+    /* 开口 fence 同行的内容是语言标记（如 js），不是代码；换行后才是正文 */
+    if (!c.startsWith('\n') && c.includes('\n')) c = c.slice(c.indexOf('\n') + 1);
+    codeBlocks.push(c.replace(/^\n|\n$/g, ''));
+    return `\u0000BLOCK${codeBlocks.length - 1}\u0000`;
+  });
+  text = text.replace(/`([^`\n]+)`/g, (_, code) => {
+    codeSpans.push(code);
+    return `\u0000SPAN${codeSpans.length - 1}\u0000`;
+  });
+  text = text.replace(/\*\*([^\n*]+)\*\*/g, '<strong>$1</strong>');
+  text = text.replace(/(^|[^\w*])\*([^\n*]+)\*/g, '$1<em>$2</em>');
+  text = text.replace(/\[([^\]\n]+)\]\(([^)\s\n]+)\)/g, (_, t, u) => {
+    return /^(https?:\/\/|mailto:|#)/i.test(u) ? `<a href="${u}" target="_blank" rel="noopener">${t}</a>` : t;
+  });
+  const lines = text.split('\n');
+  let html = '', i = 0, para = [];
+  const flushPara = () => { if (para.length) { html += `<p>${para.join('<br>')}</p>`; para = []; } };
+  while (i < lines.length) {
+    const line = lines[i];
+    const block = line.match(/^\u0000BLOCK(\d+)\u0000$/);
+    if (block) { flushPara(); html += `<pre><code>${codeBlocks[+block[1]]}</code></pre>`; i++; continue; }
+    const h = line.match(/^(#{1,3})\s+(.*)$/);
+    if (h) { flushPara(); html += `<h${h[1].length}>${h[2]}</h${h[1].length}>`; i++; continue; }
+    if (/^\s*---+\s*$/.test(line)) { flushPara(); html += '<hr>'; i++; continue; }
+    const ul = line.match(/^\s*[-*+]\s+(.*)$/);
+    const ol = line.match(/^\s*\d+[.)]\s+(.*)$/);
+    if (ul || ol) {
+      flushPara();
+      const tag = ul ? 'ul' : 'ol';
+      html += `<${tag}>`;
+      while (i < lines.length) {
+        const m = lines[i].match(ul ? /^\s*[-*+]\s+(.*)$/ : /^\s*\d+[.)]\s+(.*)$/);
+        if (!m) break;
+        html += `<li>${m[1]}</li>`;
+        i++;
+      }
+      html += `</${tag}>`;
+      continue;
+    }
+    const q = line.match(/^&gt;\s?(.*)$/); // > 已被 esc 转成 &gt;
+    if (q) {
+      flushPara();
+      const buf = [];
+      while (i < lines.length) {
+        const m = lines[i].match(/^&gt;\s?(.*)$/);
+        if (!m) break;
+        buf.push(m[1]); i++;
+      }
+      html += `<blockquote>${buf.join('<br>')}</blockquote>`;
+      continue;
+    }
+    if (!line.trim()) { flushPara(); i++; continue; }
+    para.push(line); i++;
+  }
+  flushPara();
+  html = html.replace(/\u0000BLOCK(\d+)\u0000/g, (_, k) => `<code>${codeBlocks[+k]}</code>`); // 行内围栏的兜底
+  html = html.replace(/\u0000SPAN(\d+)\u0000/g, (_, k) => `<code>${codeSpans[+k]}</code>`);
+  return html;
+}
+/* 摘要用：把 Markdown 标记剥掉，只剩纯文字，免得列表里露一堆 # * [ ] */
+function stripMarkdown(s) {
+  return String(s || '')
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`([^`]*)`/g, '$1')
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/^#{1,3}\s+/gm, '')
+    .replace(/^>\s?/gm, '')
+    .replace(/^\s*[-*+]\s+/gm, '')
+    .replace(/^\s*\d+[.)]\s+/gm, '')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/(^|[^\w*])\*([^*]+)\*/g, '$1$2')
+    .replace(/^---+\s*$/gm, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/* ---------- 记事本（仅登录后）：新建 / 编辑 / 删除 / 搜索 ---------- */
+let notes = [], noteEditingId = null, noteKw = '', noteExpandedId = null, noteDeleteArmedId = null, noteEditorDeleteArmed = false;
+async function loadNotes() {
+  try { notes = await api('/api/notes'); }
+  catch { notes = []; }
+  renderNotes();
+}
+function renderNotes() {
+  const box = $('#notes-list');
+  if (!box) return;
+  const kw = noteKw.trim().toLowerCase();
+  const list = notes.filter((n) => !kw || `${n.title || ''} ${n.content || ''}`.toLowerCase().includes(kw));
+  const count = $('#notes-count');
+  if (count) count.textContent = `共 ${notes.length} 条`;
+  box.innerHTML = list.length
+    ? list.map((n) => {
+        const open = n.id === noteExpandedId;
+        const body = n.content
+          ? (open ? renderMarkdown(n.content) : esc(stripMarkdown(n.content)))
+          : '<span class="muted">（空内容）</span>';
+        /* 点一下只展开看全文，不进编辑；删除是页内二次确认，不再用系统弹框（有的手机浏览器弹不出来，点了等于没点） */
+        const acts = (noteDeleteArmedId === n.id)
+          ? `<button class="btn danger" data-note-act="del-confirm" data-id="${n.id}">确认删除？</button><button class="btn ghost" data-note-act="del-cancel" data-id="${n.id}">取消</button>`
+          : `<button class="btn primary" data-note-act="edit" data-id="${n.id}">编辑</button><button class="btn danger" data-note-act="del" data-id="${n.id}">删除</button>`;
+        const inner = open
+          ? `<div class="note-full">${body}</div><div class="note-acts">${acts}</div>`
+          : `<p class="note-snippet">${body}</p>`;
+        return `<div class="note-item${open ? ' open' : ''}" data-id="${n.id}"><div class="note-head"><b>${esc(n.title) || '（无标题）'}</b><span class="note-time">${esc(n.updatedAt || n.createdAt || '')}</span></div>${inner}</div>`;
+      }).join('')
+    : (kw ? '<div class="empty">没有匹配的记事，换个关键词试试。</div>' : '<div class="empty">还没有记事，点「新建记事」写第一条。</div>');
+  box.querySelectorAll('.note-item').forEach((el) => {
+    el.addEventListener('click', () => {
+      noteExpandedId = (noteExpandedId === el.dataset.id) ? null : el.dataset.id;
+      renderNotes();
+    });
+  });
+  box.querySelectorAll('[data-note-act]').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const id = btn.dataset.id, act = btn.dataset.noteAct;
+      if (act === 'edit') openNoteEditor(id);
+      else if (act === 'del') { noteDeleteArmedId = id; renderNotes(); }
+      else if (act === 'del-confirm') requestDeleteNote(id);
+      else if (act === 'del-cancel') { noteDeleteArmedId = null; renderNotes(); }
+    });
+  });
+}
+/* 页内二次确认后的真删除：不再用系统 confirm */
+async function requestDeleteNote(id) {
+  const btns = [...document.querySelectorAll(`[data-note-act="del-confirm"][data-id="${id}"]`)];
+  const edBtn = $('#btn-note-del');
+  if (edBtn) btns.push(edBtn);
+  btns.forEach((b) => { b.disabled = true; });
+  try {
+    await api(`/api/notes/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (noteDeleteArmedId === id) noteDeleteArmedId = null;
+    if (noteExpandedId === id) noteExpandedId = null;
+    if (noteEditingId === id) closeNoteEditor();
+    await loadNotes();
+    toast('已删除');
+  } catch (err) { toast('删除失败：' + (err.message || err)); }
+  finally { btns.forEach((b) => { b.disabled = false; }); }
+}
+function resetNoteEditorDeleteArm() {
+  noteEditorDeleteArmed = false;
+  const btn = $('#btn-note-del');
+  if (btn) btn.textContent = '删除这条';
+}
+function openNoteEditor(id) {
+  const n = notes.find((x) => x.id === id);
+  noteEditingId = id || null;
+  $('#note-title').value = n ? (n.title || '') : '';
+  $('#note-content').value = n ? (n.content || '') : '';
+  $('#btn-note-del').style.display = n ? '' : 'none';
+  resetNotePreview();
+  resetNoteEditorDeleteArm();
+  $('#note-editor').classList.remove('hidden');
+  $('#note-editor').scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'nearest' });
+  $('#note-title').focus();
+}
+function closeNoteEditor() {
+  noteEditingId = null;
+  resetNotePreview();
+  resetNoteEditorDeleteArm();
+  $('#note-editor').classList.add('hidden');
+}
+$('#btn-note-new')?.addEventListener('click', () => openNoteEditor(null));
+$('#btn-note-cancel')?.addEventListener('click', closeNoteEditor);
+let noteSearchTimer = null;
+$('#notes-search')?.addEventListener('input', (e) => {
+  clearTimeout(noteSearchTimer);
+  noteSearchTimer = setTimeout(() => { noteKw = e.target.value; renderNotes(); }, 150);
+});
+$('#btn-note-save')?.addEventListener('click', async (e) => {
+  const btn = e.currentTarget;
+  const title = $('#note-title').value, content = $('#note-content').value;
+  if (!title.trim() && !content.trim()) { toast('标题和内容不能都空'); return; }
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = '保存中…';
+  try {
+    let saved;
+    if (noteEditingId) saved = await api(`/api/notes/${encodeURIComponent(noteEditingId)}`, { method: 'PUT', body: JSON.stringify({ title, content }) });
+    else saved = await api('/api/notes', { method: 'POST', body: JSON.stringify({ title, content }) });
+    noteExpandedId = saved.id; // 保存完直接展开这一条，所见即所存
+    await loadNotes();
+    closeNoteEditor();
+    toast('已保存');
+  } catch (err) { toast('保存失败：' + (err.message || err)); }
+  finally { btn.disabled = false; btn.textContent = old; }
+});
+$('#btn-note-del')?.addEventListener('click', () => {
+  if (!noteEditingId) return;
+  const btn = $('#btn-note-del');
+  if (!noteEditorDeleteArmed) {
+    noteEditorDeleteArmed = true;
+    btn.textContent = '确认删除？';
+    return;
+  }
+  requestDeleteNote(noteEditingId);
+});
+
+/* ---------- 记事工具栏：纯函数算新文本和新选区，调用处只负责读写 textarea ----------
+   手机端点工具栏会让输入框失焦，所以选区平时就记下来（select/keyup/click/input），
+   点按钮时先恢复选区再套格式；存的还是 Markdown，预览直接复用展开后的文章渲染 */
+let noteSel = { start: 0, end: 0 };
+const noteTaEl = $('#note-content');
+['select', 'keyup', 'click', 'input'].forEach((ev) => noteTaEl?.addEventListener(ev, () => {
+  noteSel = { start: noteTaEl.selectionStart ?? 0, end: noteTaEl.selectionEnd ?? 0 };
+}));
+function mdWrap(value, start, end, left, right) {
+  const sel = value.slice(start, end);
+  if (sel.startsWith(left) && sel.endsWith(right) && sel.length >= left.length + right.length) {
+    return [value.slice(0, start) + sel.slice(left.length, -right.length) + value.slice(end), start, end - left.length - right.length];
+  }
+  return [value.slice(0, start) + left + sel + right + value.slice(end), start + left.length, end + left.length];
+}
+function mdLinePrefix(value, start, end, prefix) {
+  const ls = value.lastIndexOf('\n', start - 1) + 1;
+  let le = value.indexOf('\n', end);
+  if (le === -1) le = value.length;
+  const lines = value.slice(ls, le).split('\n');
+  const allHave = lines.every((l) => l.startsWith(prefix));
+  const next = lines.map((l) => (allHave ? l.slice(prefix.length) : prefix + l)).join('\n');
+  return [value.slice(0, ls) + next + value.slice(le), ls, ls + next.length];
+}
+function mdHeading(value, start) {
+  const ls = value.lastIndexOf('\n', start - 1) + 1;
+  let le = value.indexOf('\n', start);
+  if (le === -1) le = value.length;
+  const line = value.slice(ls, le);
+  const m = line.match(/^(#{1,3})\s+/);
+  const next = m ? line.slice(m[0].length) : '# ' + line;
+  return [value.slice(0, ls) + next + value.slice(le), ls, ls + next.length];
+}
+function mdLink(value, start, end) {
+  const sel = value.slice(start, end);
+  const text = sel || '链接文字';
+  const ins = `[${text}](https://)`;
+  const nv = value.slice(0, start) + ins + value.slice(end);
+  const urlStart = start + 1 + text.length + 2; // '[' + 文字 + '](' 之后就是网址
+  return [nv, urlStart, urlStart + 'https://'.length];
+}
+let notePreviewing = false;
+function resetNotePreview() {
+  notePreviewing = false;
+  $('#note-content')?.classList.remove('hidden');
+  $('#note-preview')?.classList.add('hidden');
+  const pb = $('#btn-note-preview');
+  if (pb) pb.textContent = '👁 预览';
+}
+document.querySelectorAll('#note-editor [data-md]').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const ta = $('#note-content');
+    if (!ta) return;
+    ta.focus();
+    ta.setSelectionRange(noteSel.start, noteSel.end);
+    const v = ta.value, s = ta.selectionStart, e = ta.selectionEnd;
+    const kind = btn.dataset.md;
+    let r = null;
+    if (kind === 'bold') r = mdWrap(v, s, e, '**', '**');
+    else if (kind === 'italic') r = mdWrap(v, s, e, '*', '*');
+    else if (kind === 'code') r = mdWrap(v, s, e, '`', '`');
+    else if (kind === 'heading') r = mdHeading(v, s);
+    else if (kind === 'list') r = mdLinePrefix(v, s, e, '- ');
+    else if (kind === 'quote') r = mdLinePrefix(v, s, e, '> ');
+    else if (kind === 'link') r = mdLink(v, s, e);
+    if (!r) return;
+    ta.value = r[0];
+    ta.setSelectionRange(r[1], r[2]);
+    noteSel = { start: r[1], end: r[2] };
+    if (notePreviewing) $('#note-preview').innerHTML = renderMarkdown(ta.value);
+  });
+});
+$('#btn-note-preview')?.addEventListener('click', () => {
+  const ta = $('#note-content'), pv = $('#note-preview');
+  if (!ta || !pv) return;
+  notePreviewing = !notePreviewing;
+  if (notePreviewing) {
+    pv.innerHTML = ta.value ? renderMarkdown(ta.value) : '<span class="muted">（空内容）</span>';
+    ta.classList.add('hidden');
+    pv.classList.remove('hidden');
+    $('#btn-note-preview').textContent = '✏️ 编辑';
+  } else {
+    resetNotePreview();
+    ta.focus();
+  }
+});
+
+/* 落地页搜索：输入防抖 150ms，只重绘落地页；输入框本身不在重绘区内，不会丢焦点 */
+let landingSearchTimer = null;
+$('#landing-search')?.addEventListener('input', () => {
+  clearTimeout(landingSearchTimer);
+  landingSearchTimer = setTimeout(renderLanding, 150);
+});
+
 /* 快捷键：/ 聚焦搜索 · N 新建服务 · C 一键全签 */
 document.addEventListener('keydown', (e) => {
   const k = e.key.toLowerCase();
@@ -827,6 +1814,13 @@ document.addEventListener('keydown', (e) => {
 /* 卡片拖拽排序（登录后可用，顺序自动保存到服务端） */
 let dragId = null;
 const gridEl = document.getElementById('grid');
+/* 批量勾选：卡片上的复选框只改本地选中集，不触发卡片其他行为 */
+gridEl.addEventListener('change', (e) => {
+  const cb = e.target.closest('.bulk-check');
+  if (!cb) return;
+  if (cb.checked) bulkSel.add(cb.dataset.bulkId); else bulkSel.delete(cb.dataset.bulkId);
+  updateBulkCount();
+});
 gridEl.addEventListener('dragstart', (e) => {
   const c = e.target.closest('.card');
   if (!c || !live()) { e.preventDefault(); return; }
@@ -866,7 +1860,9 @@ gridEl.addEventListener('drop', async (e) => {
   } catch (err) { handleAuthErr(err); }
 });
 
-/* 卡片聚光灯 + 3D 倾斜（事件委托，兼容动态渲染） */
+/* 卡片聚光灯 + 3D 倾斜（事件委托，兼容动态渲染）
+   原来每次 mousemove 都全量查一遍 .card.is-tilting，改成只记上一张卡 + rAF 节流 */
+let lastTiltCard = null, tiltQueued = false, lastMouse = null;
 document.addEventListener('mousemove', (e) => {
   const glow = e.target.closest('.card, .stat, .ach');
   if (glow) {
@@ -874,18 +1870,27 @@ document.addEventListener('mousemove', (e) => {
     glow.style.setProperty('--mx', `${e.clientX - r.left}px`);
     glow.style.setProperty('--my', `${e.clientY - r.top}px`);
   }
-  if (reduceMotion) return;
-  const card = e.target.closest('.card');
-  document.querySelectorAll('.card.is-tilting').forEach((c) => {
-    if (c !== card) { c.classList.remove('is-tilting'); c.style.transform = ''; }
+  if (reduceMotion || !heavyFx) return;
+  lastMouse = e;
+  if (tiltQueued) return;
+  tiltQueued = true;
+  requestAnimationFrame(() => {
+    tiltQueued = false;
+    const ev = lastMouse;
+    const card = ev.target.closest('.card');
+    if (lastTiltCard && lastTiltCard !== card) {
+      lastTiltCard.classList.remove('is-tilting');
+      lastTiltCard.style.transform = '';
+    }
+    lastTiltCard = card;
+    if (card) {
+      const r = card.getBoundingClientRect();
+      const rx = ((ev.clientY - r.top) / r.height - .5) * -5;
+      const ry = ((ev.clientX - r.left) / r.width - .5) * 5;
+      card.classList.add('is-tilting');
+      card.style.transform = `translateY(-4px) perspective(750px) rotateX(${rx.toFixed(2)}deg) rotateY(${ry.toFixed(2)}deg)`;
+    }
   });
-  if (card) {
-    const r = card.getBoundingClientRect();
-    const rx = ((e.clientY - r.top) / r.height - .5) * -5;
-    const ry = ((e.clientX - r.left) / r.width - .5) * 5;
-    card.classList.add('is-tilting');
-    card.style.transform = `translateY(-4px) perspective(750px) rotateX(${rx.toFixed(2)}deg) rotateY(${ry.toFixed(2)}deg)`;
-  }
 });
 
 /* ---------- 启动：先渲染公开预览，已有会话则无缝进入正式模式 ---------- */

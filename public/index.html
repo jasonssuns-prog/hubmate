@@ -3,9 +3,15 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#08040f">
 <title>我的服务台</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🗂️</text></svg>">
-<link rel="stylesheet" href="/style.css">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="apple-touch-icon" href="/icon-180.png">
+<link rel="stylesheet" href="/style.css?v=20261101-53">
 </head>
 <body class="mode-preview" data-theme="neon">
 
@@ -17,6 +23,61 @@
 </div>
 <!-- 鼠标跟随光球 -->
 <div id="cursor-glow" aria-hidden="true"></div>
+
+<!-- 登录前落地页：无侧边栏，只展示每日签到和我的网站 -->
+<div id="landing">
+  <header class="landing-top">
+    <span class="landing-brand">🗂️ 我的服务台</span>
+    <nav class="landing-nav">
+      <a href="#landing-checkin">今日签到</a>
+      <a href="#landing-fav">我的收藏</a>
+      <a href="#landing-sites">我的网站</a>
+    </nav>
+    <button id="landing-login" class="btn primary landing-login-btn">登录</button>
+  </header>
+  <section class="landing-hero">
+    <div class="landing-badge">✦ 私人服务台 · 收藏夹</div>
+    <h1>喜欢的网站，<br><span class="grad">都收在这里。</span></h1>
+    <p>每天签到不遗漏，想学想看的网站，随时回来接着浏览。</p>
+    <div class="landing-hero-acts">
+      <button id="landing-hero-login" class="btn primary big">登录 · 开始签到</button>
+      <a class="btn ghost big" href="#landing-sites">看看我的网站 ↓</a>
+    </div>
+    <p class="landing-hero-note">公开浏览，无需登录 · 登录后可签到、收藏与管理</p>
+    <div class="landing-floats">
+      <div class="landing-float"><span class="lf-icon">⚡</span><b id="lf-done">–</b><span>今日签到</span></div>
+      <div class="landing-float"><span class="lf-icon">🔥</span><b id="lf-streak">–</b><span>最长连签</span></div>
+      <div class="landing-float"><span class="lf-icon">🗂️</span><b id="lf-sites">–</b><span>在册网站</span></div>
+    </div>
+  </section>
+  <div class="landing-ticker"><div class="landing-ticker-track" id="landing-ticker-track"></div></div>
+  <section class="landing-sec" id="landing-checkin">
+    <h2>⚡ 今日签到 <span class="sec-count" id="landing-checkin-count"></span></h2>
+    <div class="landing-bar"><div id="landing-checkin-bar"></div></div>
+    <div id="landing-checkin-list" class="landing-scroll"><div class="skel"><i></i><i></i><i></i></div></div>
+    <div id="landing-checkin-hint" class="scroll-hint hidden">↕ 框内滚动查看全部</div>
+  </section>
+  <section class="landing-sec" id="landing-fav">
+    <h2>★ 我的收藏 <span class="sec-count" id="landing-fav-count"></span></h2>
+    <p class="muted">登录后在服务卡片上点 ☆ 收藏，就会归拢到这里。</p>
+    <div id="landing-fav-grid" class="landing-scroll"><div class="skel-grid"><i></i><i></i><i></i><i></i></div></div>
+    <div id="landing-fav-hint" class="scroll-hint hidden">↕ 框内滚动查看全部</div>
+  </section>
+  <section class="landing-sec" id="landing-sites">
+    <h2>🗂️ 我的网站 <span class="sec-count" id="landing-sites-count"></span></h2>
+    <p class="muted">平时喜欢、值得反复看的网站，都集中在这里。</p>
+    <div class="landing-search"><input id="landing-search" placeholder="🔍 搜网站名称 / 网址…"></div>
+    <div id="landing-sites-grid" class="landing-scroll"><div class="skel-grid"><i></i><i></i><i></i><i></i></div></div>
+    <div id="landing-sites-hint" class="scroll-hint hidden">↕ 框内滚动查看全部</div>
+  </section>
+  <section class="landing-cta">
+    <h3>你的网站，也值得这样收着。</h3>
+    <p>登录后可以签到、收藏、管理，还能收到临期提醒。</p>
+    <button id="landing-foot-login" class="btn primary big">登录 · 开始管理 →</button>
+  </section>
+  <footer class="landing-foot">🗂️ 我的服务台 · 本地私有部署 · 数据仅存于本服务器</footer>
+</div>
+<button id="landing-to-top" class="to-top" aria-label="回到顶部">↑</button>
 
 <div class="layout">
 
@@ -30,8 +91,14 @@
     <nav class="nav">
       <a href="#sec-top" class="nav-item on"><i>🏠</i>总览</a>
       <a href="#sec-checkin" class="nav-item"><i>⚡</i>今日签到</a>
+      <a href="#sec-fav" class="nav-item live-only"><i>★</i>我的收藏</a>
+      <a href="#sec-expiring" class="nav-item live-only"><i>⏰</i>临期提醒 <span class="nav-badge" id="expiring-nav-count"></span></a>
       <a href="#sec-services" class="nav-item"><i>🗂️</i>服务台账</a>
       <a href="#sec-data" class="nav-item"><i>🏆</i>数据中心</a>
+      <a href="#sec-notify" class="nav-item live-only"><i>🔔</i>通知设置</a>
+      <a href="#sec-dupes" class="nav-item live-only"><i>♻️</i>重复清理</a>
+      <a href="#sec-cats" class="nav-item live-only"><i>🏷️</i>分类管理</a>
+      <a href="#sec-notes" class="nav-item live-only"><i>📝</i>记事本</a>
     </nav>
 
     <div class="side-foot">
@@ -50,7 +117,10 @@
       <button id="btn-add" class="btn primary block live-only">➕ 添加服务</button>
       <div class="side-btns">
         <button id="btn-export" class="btn ghost small live-only" title="导出台账 Markdown 到项目目录">📄 导出</button>
-        <button id="btn-backup" class="btn ghost small live-only" title="下载完整数据备份（data.json）">💾 备份</button>
+        <button id="btn-backup" class="btn ghost small live-only" title="下载完整数据备份（已去掉密码哈希和机器人 Token）">💾 备份</button>
+        <button id="btn-restore" class="btn ghost small live-only" title="从备份文件恢复（会先自动备份当前数据）">⬆️ 恢复</button>
+        <input type="file" id="restore-file" accept=".json,application/json" class="hidden">
+        <button id="btn-linkcheck" class="btn ghost small live-only" title="逐个探活，疑似失效的标在卡片上">🔗 检测链接</button>
         <button id="btn-pass" class="btn ghost small live-only">🔑 改密码</button>
         <button id="btn-logout" class="btn ghost small live-only">🚪 退出</button>
         <button id="btn-login" class="btn primary small preview-only">🔓 登录</button>
@@ -113,16 +183,126 @@
         <span id="checkin-progress" class="muted"></span>
       </div>
       <div class="bar"><div id="checkin-bar" class="bar-in"></div></div>
-      <div id="checkin-list"></div>
+      <div id="checkin-list"><div class="skel"><i></i><i></i><i></i></div></div>
+    </section>
+
+    <section class="panel live-only" id="sec-fav">
+      <div class="panel-head">
+        <h2>★ 我的收藏管理</h2>
+        <span id="fav-count" class="muted"></span>
+      </div>
+      <div class="help-fold"><button class="help-toggle" type="button">📖 说明 ▾</button><div class="help-body"><p class="muted">在这里统一管理收藏：点卡片上的 ☆ 可以添加，点 ★ 可以取消；也可以在编辑服务时勾选收藏。</p></div></div>
+      <div id="fav-list"></div>
+    </section>
+
+    <section class="panel live-only" id="sec-expiring">
+      <div class="panel-head">
+        <h2>⏰ 临期提醒</h2>
+        <span id="expiring-count" class="muted"></span>
+      </div>
+      <div class="help-fold"><button class="help-toggle" type="button">📖 说明 ▾</button><div class="help-body"><p class="muted">30 天内到期（含已过期）的服务，按最紧急的排在最前。点名称直达官网去办理，办完后点“编辑”更新到期时间。</p></div></div>
+      <div id="expiring-list"></div>
+    </section>
+
+    <section class="panel live-only" id="sec-notify">
+      <div class="panel-head">
+        <h2>🔔 通知设置</h2>
+        <span id="notify-status" class="muted"></span>
+      </div>
+      <div class="help-fold"><button class="help-toggle" type="button">📖 说明 ▾</button><div class="help-body"><p class="muted">通过 Telegram 机器人推送提醒。Token 只存在你的服务器上，设置页不会把它显示出来；两个开关各管一种提醒，每天到你设定的时间后各推一次，有事才推，没事不打扰。签到提醒还可以在固定时间后每隔几小时重复推一次（23 点后不推，签完即停），间隔填 0 表示不重复。注意：沙箱休眠时推送会暂停，醒来后补推。机器人还支持 /today、/expiring 命令查询。</p></div></div>
+      <div class="fgrid">
+        <label class="span2">Bot Token（@BotFather 处获取）<input id="n-token" type="password" autocomplete="off" placeholder="留空表示不改；首次设置必填"></label>
+        <label class="span2">Chat ID<input id="n-chat" placeholder="数字 ID，或先保存 Token 后点“自动获取”"></label>
+        <label><input id="n-expiring" type="checkbox" style="width:auto"> ⏰ 临期提醒（30 天内到期）</label>
+        <label><input id="n-checkin" type="checkbox" style="width:auto"> ⚡ 每日签到提醒（还有未签时）</label>
+        <label>每天几点后推送（北京时间，0–23）<input id="n-pushhour" type="number" min="0" max="23" step="1" value="9"></label>
+        <label>签到未完成时，每隔几小时再推一次（0 表示不重复）<input id="n-repeat" type="number" min="0" max="24" step="1" value="0"></label>
+      </div>
+      <div class="modal-acts" style="justify-content:flex-start">
+        <button id="btn-notify-save" class="btn primary">保存设置</button>
+        <button id="btn-notify-resolve" class="btn ghost">自动获取 Chat ID</button>
+        <button id="btn-notify-test" class="btn ghost">发送测试消息</button>
+      </div>
+      <p class="muted" id="notify-msg"></p>
+    </section>
+
+    <section class="panel live-only" id="sec-dupes">
+      <div class="panel-head">
+        <h2>♻️ 重复清理</h2>
+        <span class="muted">同名或同域名算一组</span>
+      </div>
+      <div class="help-fold"><button class="help-toggle" type="button">📖 说明 ▾</button><div class="help-body"><p class="muted">扫出名字相同、或网址域名相同的服务，留一个删一个。编辑复用原来的编辑框，删完列表会自动刷新。</p></div></div>
+      <div class="modal-acts" style="justify-content:flex-start">
+        <button id="btn-dup-scan" class="btn primary">扫描重复</button>
+      </div>
+      <div id="dupes-list"></div>
+    </section>
+
+    <section class="panel live-only" id="sec-cats">
+      <div class="panel-head">
+        <h2>🏷️ 分类管理</h2>
+        <span class="muted">新分类会出现在筛选、添加下拉和首页收藏分组里</span>
+      </div>
+      <div class="help-fold"><button class="help-toggle" type="button">📖 说明 ▾</button><div class="help-body"><p class="muted">系统分类（收藏、每日签到、中转站、VPS、游戏、域名、已闲置）不能删除，可以改名换图标。自定义分类只有里面没有服务时才能删；有服务时请先去把服务编辑到其他分类，再回来删。</p></div></div>
+      <div class="fgrid">
+        <label>图标<select id="c-icon"></select></label>
+        <label>新分类名<input id="c-label" placeholder="如 系统镜像"></label>
+      </div>
+      <div class="modal-acts" style="justify-content:flex-start">
+        <button id="btn-cat-add" class="btn primary">添加分类</button>
+      </div>
+      <div id="cats-list"></div>
+    </section>
+
+    <section class="panel live-only" id="sec-notes">
+      <div class="panel-head">
+        <h2>📝 记事本</h2>
+        <span class="muted" id="notes-count"></span>
+      </div>
+      <div class="help-fold"><button class="help-toggle" type="button">📖 说明 ▾</button><div class="help-body"><p class="muted">只在登录后可见，公开页面和公开接口里都没有。重要的东西写下来，忘了回来搜。内容支持 Markdown：# 标题、**粗体**、*斜体*、`代码`、- 列表、&gt; 引用、[链接](网址)，展开后按文章排版显示；编辑器里有工具栏，点 👁 预览能看到文章效果。</p></div></div>
+      <div class="notes-toolbar">
+        <input id="notes-search" placeholder="🔍 搜标题 / 内容…">
+        <button id="btn-note-new" class="btn primary">➕ 新建记事</button>
+      </div>
+      <div id="note-editor" class="hidden">
+        <input id="note-title" placeholder="标题（可空）" maxlength="100">
+        <div class="note-toolbar" role="toolbar">
+          <button class="btn small ghost" data-md="bold"><b>B</b></button>
+          <button class="btn small ghost" data-md="italic"><i>I</i></button>
+          <button class="btn small ghost" data-md="heading">H 标题</button>
+          <button class="btn small ghost" data-md="list">• 列表</button>
+          <button class="btn small ghost" data-md="quote">❝ 引用</button>
+          <button class="btn small ghost" data-md="code">代码</button>
+          <button class="btn small ghost" data-md="link">🔗 链接</button>
+          <button class="btn small ghost" id="btn-note-preview">👁 预览</button>
+        </div>
+        <textarea id="note-content" rows="6" placeholder="写下来，忘了回来找…（支持 Markdown，工具栏点一下就套格式）" maxlength="20000"></textarea>
+        <div id="note-preview" class="note-full hidden"></div>
+        <div class="modal-acts" style="justify-content:flex-start">
+          <button id="btn-note-save" class="btn primary">保存</button>
+          <button id="btn-note-cancel" class="btn ghost">取消</button>
+          <button id="btn-note-del" class="btn danger">删除这条</button>
+        </div>
+      </div>
+      <div id="notes-list"></div>
     </section>
 
     <div id="sec-services">
       <div id="chips" class="chips"></div>
       <div class="toolbar">
-        <input id="search" placeholder="🔍 搜名称 / 账号 / 备注…">
+        <input id="search" placeholder="🔍 搜名称 / 账号 / 网址 / 备注…">
         <span id="stats" class="muted"></span>
+        <button id="btn-bulk" class="btn ghost small live-only">☑️ 批量</button>
       </div>
-      <div id="grid"></div>
+      <div id="bulk-bar" class="bulk-bar hidden live-only">
+        <span id="bulk-count" class="muted">还没选</span>
+        <select id="bulk-cat"></select>
+        <button id="btn-bulk-move" class="btn small primary">移到分类</button>
+        <button id="btn-bulk-del" class="btn small ghost">删除所选</button>
+        <button id="btn-bulk-all" class="btn small ghost">全选当前页</button>
+        <button id="btn-bulk-exit" class="btn small ghost">退出</button>
+      </div>
+      <div id="grid"><div class="skel-grid"><i></i><i></i><i></i><i></i></div></div>
     </div>
 
     <section class="panel" id="sec-trend">
@@ -155,6 +335,13 @@
     <form id="login-form" class="fgrid">
       <label class="span2">用户名<input id="l-user" autocomplete="username" required></label>
       <label class="span2">密码<input id="l-pass" type="password" autocomplete="current-password" required></label>
+      <label class="span2">验证码
+        <span class="captcha-row">
+          <input id="l-captcha" autocomplete="off" placeholder="输入图中字符" required>
+          <span id="l-captcha-img" class="captcha-img" title="点击换一张"></span>
+          <button id="l-captcha-refresh" class="btn ghost small" type="button">换一张</button>
+        </span>
+      </label>
       <div id="l-err" class="err span2 hidden"></div>
       <div class="modal-acts span2">
         <button id="login-cancel" class="btn ghost" type="button">取消</button>
@@ -173,6 +360,7 @@
       <label>名称 *<input id="f-name" placeholder="如：XX中转站"></label>
       <label>分类
         <select id="f-category">
+          <option value="fav">★ 收藏</option>
           <option value="checkin">📅 每日签到</option>
           <option value="relay">🔀 中转站 / API</option>
           <option value="vps">🖥️ VPS / 服务器</option>
@@ -187,13 +375,19 @@
       <label>注册 / 购买日期<input id="f-registered" type="date"></label>
       <label>到期日<input id="f-expires" type="date"></label>
       <label>价格<input id="f-price" placeholder="如 $10/年"></label>
+      <div class="more-fold span2"><button class="more-toggle" type="button">⚙️ 更多设置：签到与续期规则 ▾</button><div class="more-body">
       <label>签到频率
         <select id="f-frequency">
           <option value="none">不签到</option>
           <option value="daily">每天</option>
         </select>
       </label>
+      <label>签到间隔（天，1=每天）<input id="f-every-days" type="number" min="1" max="365" value="1"></label>
+      <label>续期周期（天，365=一年）<input id="f-renew-days" type="number" min="1" max="3650" value="365"></label>
+      </div></div>
       <label class="span2">备注第一行会显示成卡片上的加粗介绍<textarea id="f-notes" rows="2"></textarea></label>
+      <label class="span2"><input id="f-fav" type="checkbox" style="width:auto"> ★ 收藏这个网站（会显示在首页“我的收藏”里）</label>
+      <label class="span2"><input id="f-abnormal" type="checkbox" style="width:auto"> ⚠️ 标记异常（这个网站暂时有问题、签到不了，会标红显示）</label>
     </div>
     <div class="modal-acts">
       <button id="modal-cancel" class="btn ghost">取消</button>
@@ -219,6 +413,6 @@
 </div>
 
 <div id="toast"></div>
-<script src="/app.js"></script>
+<script src="/app.js?v=20261101-53"></script>
 </body>
 </html>
