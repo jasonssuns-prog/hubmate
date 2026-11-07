@@ -414,6 +414,24 @@ function currentUser(req) {
   if (!rec || Date.now() - rec.created > SESSION_MS) return null;
   return { token, sessions };
 }
+/* v59：API 令牌（给 iOS 快捷指令用）——只放行签到那两个接口，别的一律不认；
+   令牌放请求头 Authorization: Bearer <token> 或 ?token= 参数里 */
+function isApiToken(req) {
+  const h = req.headers.authorization || '';
+  const m = h.match(/^Bearer\s+(\S+)$/i);
+  let tok = m ? m[1] : '';
+  if (!tok) {
+    try { tok = new URL(req.url, 'http://x').searchParams.get('token') || ''; } catch { tok = ''; }
+  }
+  if (!tok) return false;
+  const data = loadData();
+  return !!data.apiToken && data.apiToken === tok;
+}
+function isTokenAllowedEndpoint(pathname, method) {
+  if (method !== 'POST') return false;
+  if (pathname === '/api/checkins/all') return true;
+  return /^\/api\/services\/[0-9a-f]+\/checkin$/.test(pathname);
+}
 /* ---------- 多账号：一个服务可存多个账号（名字/账号/密码/备注），其中一个是默认 ---------- */
 function sanitizeAccount(a) {
   if (!a || typeof a !== 'object') return null;
@@ -895,14 +913,23 @@ async function checkLinks() {
   try {
     const data = loadData();
     const t = todayStr();
+    const now = Date.now();
     const results = await Promise.all(data.services.map(async (s) => ({ id: s.id, st: await probeLink(s.url) })));
-    /* 探活要等网络，期间用户可能改过数据：写回前重新读盘，只合并 linkStatus，
-       绝不把探活开始时的整盘快照写回去盖掉别人的改动（删掉的服务跳过） */
+    /* 探活要等网络，期间用户可能改过数据：写回前重新读盘，只合并 linkStatus 和 linkHistory，
+       绝不把探活开始时的整盘快照写回去盖掉别人的改动（删掉的服务跳过）；
+       v59：每次探活都记一笔（ok=通，dead=不通，unknown 不记——结论不明不算），只留最近 120 条（约 30 天） */
     const fresh = loadData();
     let changed = false;
     for (const { id, st } of results) {
       const s = fresh.services.find((x) => x.id === id);
-      if (s && s.linkStatus !== st) { s.linkStatus = st; s.linkCheckedAt = t; changed = true; }
+      if (!s) continue;
+      if (s.linkStatus !== st) { s.linkStatus = st; s.linkCheckedAt = t; changed = true; }
+      if (st === 'ok' || st === 'dead') {
+        s.linkHistory = (Array.isArray(s.linkHistory) ? s.linkHistory : []).filter((h) => h && typeof h.t === 'number');
+        s.linkHistory.push({ t: now, ok: st === 'ok' });
+        if (s.linkHistory.length > 120) s.linkHistory = s.linkHistory.slice(-120);
+        changed = true;
+      }
     }
     if (changed) writeJSON(DATA_FILE, fresh);
     return {
@@ -1021,7 +1048,27 @@ async function handleAPI(req, res, pathname) {
   }
 
   const auth = currentUser(req);
-  if (!auth) return send(401, { error: '未登录' });
+  /* v59：API 令牌只放行签到接口（没登录也能用令牌签到），别的接口仍要登录 */
+  const tokenAllowed = !auth && isApiToken(req) && isTokenAllowedEndpoint(pathname, req.method);
+  if (!auth && !tokenAllowed) return send(401, { error: '未登录' });
+
+  /* v59：API 令牌管理——生成/作废都要登录；令牌只在生成那一刻返回一次，平时只告诉你有没有 */
+  if (pathname === '/api/api-token/status' && req.method === 'GET') {
+    const data = loadData();
+    return send(200, { hasToken: !!data.apiToken });
+  }
+  if (pathname === '/api/api-token' && req.method === 'POST') {
+    const data = loadData();
+    data.apiToken = crypto.randomBytes(24).toString('hex');
+    writeJSON(DATA_FILE, data);
+    return send(200, { ok: true, token: data.apiToken });
+  }
+  if (pathname === '/api/api-token/revoke' && req.method === 'POST') {
+    const data = loadData();
+    delete data.apiToken;
+    writeJSON(DATA_FILE, data);
+    return send(200, { ok: true });
+  }
 
   /* ---------- 记事本：仅登录后可用，不进公开接口、不上落地页 ---------- */
   if (pathname === '/api/notes' && req.method === 'GET') {
@@ -1207,6 +1254,7 @@ async function handleAPI(req, res, pathname) {
     const data = loadData();
     const out = { ...data };
     delete out.passwordHash;
+    delete out.apiToken;
     out.notify = { ...(data.notify || {}) };
     delete out.notify.token;
     const fname = `service-hub-backup-${todayStr()}.json`;
@@ -1257,7 +1305,9 @@ async function handleAPI(req, res, pathname) {
       checkins: Array.isArray(s.checkins) ? s.checkins.filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)) : [],
       visits: Number(s.visits) || 0,
       sortOrder: Number(s.sortOrder) || 0,
-      linkStatus: s.linkStatus
+      linkStatus: s.linkStatus,
+      linkHistory: (Array.isArray(s.linkHistory) ? s.linkHistory : []).filter((h) => h && typeof h.t === 'number' && typeof h.ok === 'boolean').slice(-120),
+      renewHistory: (Array.isArray(s.renewHistory) ? s.renewHistory : []).filter((h) => h && /^\d{4}-\d{2}-\d{2}$/.test(h.at || '') && typeof h.from === 'string' && typeof h.to === 'string').slice(-20)
     }));
     data.categories = cats.map((c) => ({ id: c.id, label: String(c.label).slice(0, 20), icon: cleanIcon(c.icon), cls: c.cls || 't-custom' }));
     if (imp.history && typeof imp.history === 'object') data.history = imp.history;
@@ -1375,10 +1425,25 @@ async function handleAPI(req, res, pathname) {
       writeJSON(DATA_FILE, data);
       return send(200, { ok: true, moved });
     }
+    if (body.action === 'edit') {
+      /* v59：批量编辑——只改传了的字段（空着不动），签到间隔 1–365 天，续期周期 1–3650 天 */
+      const every = (body.checkinEveryDays === '' || body.checkinEveryDays == null) ? null : clampInt(body.checkinEveryDays, 1, 365, null);
+      const renew = (body.renewDays === '' || body.renewDays == null) ? null : clampInt(body.renewDays, 1, 3650, null);
+      if (every === null && renew === null) return send(400, { error: '没填要改的内容' });
+      let updated = 0;
+      for (const s of data.services) {
+        if (!ids.has(s.id)) continue;
+        if (every !== null) s.checkinEveryDays = every;
+        if (renew !== null) s.renewDays = renew;
+        updated++;
+      }
+      writeJSON(DATA_FILE, data);
+      return send(200, { ok: true, updated });
+    }
     return send(400, { error: '未知操作' });
   }
 
-  const m = pathname.match(/^\/api\/services\/([0-9a-f]+)(\/checkin|\/uncheckin|\/checkin-account|\/uncheckin-account|\/visit|\/undo-renew|\/renew|\/move)?$/);
+  const m = pathname.match(/^\/api\/services\/([0-9a-f]+)(\/checkin|\/uncheckin|\/checkin-account|\/uncheckin-account|\/visit|\/undo-renew|\/renew|\/move|\/duplicate)?$/);
   if (m) {
     const data = loadData();
     const idx = data.services.findIndex((s) => s.id === m[1]);
@@ -1445,14 +1510,25 @@ async function handleAPI(req, res, pathname) {
          也推到新周期起点（未过期的从原到期日起，已过期的从今天起），开始时间 + 续期周期 = 到期日，循环不断 */
       svc.prevRenew = { expiresAt: svc.expiresAt || '', registeredAt: svc.registeredAt || '' };
       delete svc.prevExpiresAt;
+      /* v59：续期记录——每次续期记一笔（哪天续的、从哪天续到哪天），只留最近 20 条；
+         撤回续期时把对应的那条也拿掉（那次续期等于没发生） */
+      svc.renewHistory = (Array.isArray(svc.renewHistory) ? svc.renewHistory : []).filter((h) => h && /^\d{4}-\d{2}-\d{2}$/.test(h.at || ''));
+      const newExpires = days === 365 ? addYear(base) : addDays(base, days);
+      svc.renewHistory.push({ at: t, from: svc.expiresAt || '', to: newExpires });
+      if (svc.renewHistory.length > 20) svc.renewHistory = svc.renewHistory.slice(-20);
       svc.registeredAt = base;
-      svc.expiresAt = days === 365 ? addYear(base) : addDays(base, days);
+      svc.expiresAt = newExpires;
       writeJSON(DATA_FILE, data);
       return send(200, { ok: true, expiresAt: svc.expiresAt });
     }
     if (req.method === 'POST' && m[2] === '/undo-renew') {
       const snap = svc.prevRenew || (svc.prevExpiresAt ? { expiresAt: svc.prevExpiresAt, registeredAt: svc.registeredAt } : null);
       if (!snap) return send(400, { error: '没有可撤回的续期' });
+      /* v59：撤回续期时，把记录里对应那次续期（to 等于当前到期日的那条）拿掉 */
+      if (Array.isArray(svc.renewHistory) && svc.renewHistory.length) {
+        const last = svc.renewHistory[svc.renewHistory.length - 1];
+        if (last && last.to === svc.expiresAt) svc.renewHistory.pop();
+      }
       svc.expiresAt = snap.expiresAt || '';
       if (typeof snap.registeredAt === 'string') svc.registeredAt = snap.registeredAt;
       delete svc.prevRenew;
@@ -1471,6 +1547,30 @@ async function handleAPI(req, res, pathname) {
       const tmp = group[i].sortOrder; group[i].sortOrder = group[j].sortOrder; group[j].sortOrder = tmp;
       writeJSON(DATA_FILE, data);
       return send(200, { ok: true, moved: true });
+    }
+    if (req.method === 'POST' && m[2] === '/duplicate') {
+      /* v59：复制服务——新编号、名字后加“副本”、排在同分类最后；签到记录/访问/续期历史
+         不带过去（新服务从零开始），账号带过去（新编号，签到记录清掉），改完再调 */
+      const maxOrder = data.services.filter((s) => s.category === svc.category).reduce((n, s) => Math.max(n, s.sortOrder ?? 0), 0);
+      const copy = {
+        ...svc,
+        id: crypto.randomBytes(6).toString('hex'),
+        name: (svc.name || '服务').slice(0, 96) + ' 副本',
+        checkins: [],
+        visits: 0,
+        sortOrder: maxOrder + 1,
+        linkStatus: undefined,
+        linkCheckedAt: undefined,
+        renewHistory: [],
+        prevRenew: undefined,
+        prevExpiresAt: undefined,
+        accounts: (Array.isArray(svc.accounts) ? svc.accounts : []).map((a) => ({ ...sanitizeAccount(a), id: crypto.randomBytes(6).toString('hex'), checkins: [] }))
+      };
+      copy.account = copy.accounts.find((a) => a.isDefault)?.username || '';
+      copy.secret = copy.accounts.find((a) => a.isDefault)?.password || '';
+      data.services.push(copy);
+      writeJSON(DATA_FILE, data);
+      return send(200, copy);
     }
     if (req.method === 'POST' && m[2] === '/uncheckin') {
       /* v57：多账号的服务，撤回就是把今天从所有账号和服务级记录里都拿掉；没账号的和原来一样 */

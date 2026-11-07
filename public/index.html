@@ -11,7 +11,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="apple-touch-icon" href="/icon-180.png">
-<link rel="stylesheet" href="/style.css?v=20261107-58">
+<link rel="stylesheet" href="/style.css?v=20261107-59">
 </head>
 <body class="mode-preview" data-theme="neon">
 
@@ -97,6 +97,7 @@
       <a href="#sec-services" class="nav-item"><i>🗂️</i>服务台账</a>
       <a href="#sec-data" class="nav-item"><i>🏆</i>数据中心</a>
       <a href="#sec-notify" class="nav-item live-only"><i>🔔</i>通知设置</a>
+      <a href="#sec-apitoken" class="nav-item live-only"><i>🔑</i>API 令牌</a>
       <a href="#sec-dupes" class="nav-item live-only"><i>♻️</i>重复清理</a>
       <a href="#sec-pwreuse" class="nav-item live-only"><i>🔐</i>密码复用 <span class="nav-badge" id="pwreuse-nav-count"></span></a>
       <a href="#sec-cats" class="nav-item live-only"><i>🏷️</i>分类管理</a>
@@ -255,6 +256,23 @@
       <p class="muted" id="notify-msg"></p>
     </section>
 
+    <section class="panel live-only" id="sec-apitoken">
+      <div class="panel-head">
+        <h2>🔑 API 令牌</h2>
+        <span id="apitoken-status" class="muted"></span>
+      </div>
+      <div class="help-fold"><button class="help-toggle" type="button">📖 说明 ▾</button><div class="help-body"><p class="muted">给 iOS 快捷指令用的令牌：不用打开网页就能签到。令牌只放行签到接口（全部签到、签一个服务），别的接口一律不认；令牌只在生成那一刻显示一次，平时只告诉你有没有，丢了随时作废重发。令牌不要发给别人，也不要放进公开的快捷指令分享里。</p></div></div>
+      <div class="cal-sub-row"><code id="apitoken-value" style="word-break:break-all">还没生成令牌</code><button class="btn small ghost" id="btn-copy-apitoken" disabled>复制令牌</button></div>
+      <div class="modal-acts" style="justify-content:flex-start">
+        <button id="btn-apitoken-gen" class="btn primary">生成令牌</button>
+        <button id="btn-apitoken-revoke" class="btn ghost">作废令牌</button>
+      </div>
+      <ol class="cal-steps">
+        <li>iPhone 快捷指令：新建快捷指令 → 添加“获取 URL 内容” → URL 填 <code id="apitoken-url"></code> → 方法选 POST → 再加一个“显示通知”或“显示提醒”就行。想签一个服务，把结尾的 <code>/api/checkins/all</code> 换成 <code>/api/services/服务编号/checkin</code>。</li>
+        <li>也可以用命令行：<code id="apitoken-curl"></code></li>
+      </ol>
+    </section>
+
     <section class="panel live-only" id="sec-dupes">
       <div class="panel-head">
         <h2>♻️ 重复清理</h2>
@@ -339,6 +357,7 @@
         <button id="btn-bulk-del" class="btn small ghost">删除所选</button>
         <button id="btn-bulk-all" class="btn small ghost">全选当前页</button>
         <button id="btn-bulk-exit" class="btn small ghost">退出</button>
+        <span class="bulk-edit-row"><span class="muted">批量改：</span><label>签到间隔 <input id="bulk-every" type="number" min="1" max="365" placeholder="天" style="width:64px"></label><label>续期周期 <input id="bulk-renew" type="number" min="1" max="3650" placeholder="天" style="width:64px"></label><button id="btn-bulk-edit" class="btn small primary">应用修改</button></span>
       </div>
       <div id="grid"><div class="skel-grid"><i></i><i></i><i></i><i></i></div></div>
     </div>
@@ -442,7 +461,13 @@
       <div class="fgrid">
         <label>账号名称<input id="am-label" placeholder="如：主号"></label>
         <label>账号<input id="am-username" placeholder="账号"></label>
-        <label class="span2">密码 / 密钥<input id="am-password" placeholder="密码 / 密钥"></label>
+        <label class="span2">密码 / 密钥
+          <span style="display:flex;gap:8px">
+            <input id="am-password" placeholder="密码 / 密钥" style="flex:1;min-width:0">
+            <select id="am-pw-len" style="width:74px;flex:none" title="生成密码的长度"><option value="12">12位</option><option value="16" selected>16位</option><option value="20">20位</option><option value="24">24位</option></select>
+            <button id="am-gen-pw" class="btn ghost" type="button" title="生成一个随机强密码">🎲 生成</button>
+          </span>
+        </label>
         <label class="span2">备注（可选）<input id="am-notes" placeholder="备注（可选）"></label>
       </div>
       <div class="modal-acts">
@@ -474,6 +499,6 @@
 </div>
 
 <div id="toast"></div>
-<script src="/app.js?v=20261107-58"></script>
+<script src="/app.js?v=20261107-59"></script>
 </body>
 </html>

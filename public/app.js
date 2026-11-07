@@ -138,6 +138,15 @@ function serviceProgress(s, t) {
   if (!accs.length) return { done: (s.checkins || []).includes(t) ? 1 : 0, total: 1 };
   return { done: accs.filter((a) => accCheckins(a).includes(t)).length, total: accs.length };
 }
+/* v59：网站在线率——取最近 N 天内的探活记录里“通”的占比；记录不够就不显示 */
+function uptimeRate(s, days) {
+  const hist = (Array.isArray(s?.linkHistory) ? s.linkHistory : []).filter((h) => h && typeof h.t === 'number' && typeof h.ok === 'boolean');
+  if (!hist.length) return null;
+  const cutoff = Date.now() - days * 86400e3;
+  const recent = hist.filter((h) => h.t >= cutoff);
+  if (!recent.length) return null;
+  return Math.round((recent.filter((h) => h.ok).length / recent.length) * 100);
+}
 /* 下次签到（只给间隔 > 1 天的服务显示）：没签过就是今天；否则上次签到 + 间隔天数；算出来已过期的也算今天 */
 function nextCheckinLabel(s, t) {
   if (s.checkinFrequency !== 'daily' || s.category === 'idle' || everyDays(s) <= 1) return '';
@@ -367,7 +376,7 @@ function renderAll() {
 
   renderBanner();
   if (!live()) renderLanding();
-  else { renderFav(); renderExpiring(); renderPwReuse(); renderYearReview(); }
+  else { renderFav(); renderExpiring(); renderPwReuse(); renderYearReview(); refreshApiTokenStatus(); }
   const sb = $('#sec-banner');
   if (live() && meta.passwordIsDefault) {
     sb.innerHTML = '🔒 当前还是初始默认密码，部署到服务器前务必点右上角「改密码」换掉！';
@@ -507,12 +516,18 @@ function cardHTML(s, idx) {
   const bold = cardBold(s);
   const noteLines = (s.notes || '').split(/\r?\n/).slice(1).filter(Boolean);
   const nextCk = nextCheckinLabel(s, todayStr());
+  const lastRenew = (s.renewHistory || []).length ? s.renewHistory[s.renewHistory.length - 1].at : '';
+  const up7 = uptimeRate(s, 7);
+  const up30 = uptimeRate(s, 30);
   const metaLine = [
     s.registeredAt ? `注册 ${esc(s.registeredAt)}` : '',
     s.expiresAt ? `到期 ${esc(s.expiresAt)}` : '',
+    lastRenew ? `上次续期 ${esc(lastRenew)}` : '',
     s.price ? esc(s.price) : '',
     s.hasAccount ? '账号已录 🔒' : '',
-    nextCk ? `下次签到 ${nextCk}` : ''
+    nextCk ? `下次签到 ${nextCk}` : '',
+    up7 !== null ? `在线 ${up7}%（7天）` : '',
+    up30 !== null && up30 !== up7 ? `30天 ${up30}%` : ''
   ].filter(Boolean).join(' · ') || (live() ? '补个账号备注吧' : '登录后可补全信息');
 
   const actions = live()
@@ -526,6 +541,7 @@ function cardHTML(s, idx) {
               ? `<button class="btn small primary" data-act="checkin" data-id="${s.id}">签到</button>` : '')) : ''}
         <button class="btn small ghost" data-act="acc-manager" data-id="${s.id}" title="管这个服务的账号（加/改/删账号）">👤 账号${accountList(s).length ? ` (${accountList(s).length})` : ''}</button>
         <button class="btn small ghost" data-act="edit" data-id="${s.id}">编辑</button>
+        <button class="btn small ghost" data-act="duplicate" data-id="${s.id}" title="复制出一个一样的服务">复制</button>
         <button class="btn small ghost" data-act="move-up" data-id="${s.id}" title="上移">↑</button>
         <button class="btn small ghost" data-act="move-down" data-id="${s.id}" title="下移">↓</button>
         <button class="btn small ghost" data-act="del" data-id="${s.id}">删除</button>
@@ -704,6 +720,8 @@ function renderFav() {
 }
 
 /* ---------- 临期提醒专区（仅登录后，30 天内到期含已过期） ---------- */
+/* v59：续期记录展开/收起（纯前端，不写数据） */
+const expandedRenewHistory = new Set();
 function renderExpiring() {
   const box = $('#expiring-list');
   if (!box) return;
@@ -724,7 +742,8 @@ function renderExpiring() {
           : (d === 0 ? '<span class="exp-badge overdue">今天到期</span>'
           : (d <= 7 ? `<span class="exp-badge soon">${d} 天后到期</span>`
           : `<span class="exp-badge later">${d} 天后到期</span>`));
-        return `<div class="landing-checkin-item"><span class="ck">⏰</span><span class="ck-name">${s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.name)}</a>` : esc(s.name)}</span><span class="ck-note">${esc(CATS[s.category]?.label || s.category)} · 到期 ${esc(s.expiresAt)}${host ? ` · ${esc(host)}` : ''}</span>${badge}<button class="btn small ghost" data-act="renew" data-id="${s.id}">${renewLabel(s)}</button><button class="btn small ghost" data-act="edit" data-id="${s.id}">编辑</button>${(s.prevRenew || s.prevExpiresAt) ? `<button class="btn small ghost" data-act="undo-renew" data-id="${s.id}">↩ 撤回续期</button>` : ''}</div>`;
+        const hist = (s.renewHistory || []).slice().reverse().map((h) => `<div>${esc(h.at)}：${esc(h.from || '—')} → ${esc(h.to)}</div>`).join('');
+        return `<div class="exp-item"><div class="landing-checkin-item"><span class="ck">⏰</span><span class="ck-name">${s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.name)}</a>` : esc(s.name)}</span><span class="ck-note">${esc(CATS[s.category]?.label || s.category)} · 到期 ${esc(s.expiresAt)}${host ? ` · ${esc(host)}` : ''}</span>${badge}<button class="btn small ghost" data-act="renew" data-id="${s.id}">${renewLabel(s)}</button><button class="btn small ghost" data-act="edit" data-id="${s.id}">编辑</button>${(s.prevRenew || s.prevExpiresAt) ? `<button class="btn small ghost" data-act="undo-renew" data-id="${s.id}">↩ 撤回续期</button>` : ''}${(s.renewHistory || []).length ? `<button class="btn small ghost" data-act="toggle-renew-hist" data-id="${s.id}">📜 记录 (${s.renewHistory.length})</button>` : ''}</div>${expandedRenewHistory.has(s.id) && hist ? `<div class="renew-hist">${hist}</div>` : ''}</div>`;
       }).join('')
     : '<div class="empty">太好了，30 天内没有要到期的服务。</div>';
   renderCalendar();
@@ -898,6 +917,25 @@ function hideAccForm() {
   $('#am-form')?.classList.add('hidden');
   accMgrEditId = null;
 }
+/* v59：密码生成器——crypto 随机，四类字符（大小写/数字/符号）至少各一个，
+   排除了容易看错的 I O l o 0 1 */
+function generatePassword(len) {
+  const sets = ['ABCDEFGHJKLMNPQRSTUVWXYZ', 'abcdefghijkmnpqrstuvwxyz', '23456789', '!@#$%^&*_-+='];
+  const all = sets.join('');
+  const n = Math.min(64, Math.max(8, parseInt(len, 10) || 16));
+  const buf = new Uint32Array(n);
+  crypto.getRandomValues(buf);
+  const pick = (set, i) => set[buf[i] % set.length];
+  const chars = sets.map((set, i) => pick(set, i));
+  for (let i = sets.length; i < n; i++) chars.push(pick(all, i));
+  for (let i = chars.length - 1; i > 0; i--) { const j = buf[i] % (i + 1); [chars[i], chars[j]] = [chars[j], chars[i]]; }
+  return chars.join('');
+}
+$('#am-gen-pw').addEventListener('click', () => {
+  const pw = generatePassword($('#am-pw-len').value);
+  $('#am-password').value = pw;
+  toast('已生成强密码，记得保存账号');
+});
 function showAccForm(acc) {
   accMgrEditId = acc ? acc.id : null;
   $('#am-label').value = acc?.label || '';
@@ -1033,10 +1071,17 @@ document.body.addEventListener('click', async (e) => {
 
   /* 防连点：写数据的按钮点下去就禁用，直到请求 + 刷新完成；失败也恢复。
      只拦真正写数据的动作，打开弹窗/登录/查看密钥这种纯前端动作不拦 */
-  const guarded = ['fav', 'checkin', 'uncheckin', 'checkin-acc', 'uncheckin-acc', 'renew', 'undo-renew', 'move-up', 'move-down', 'del', 'set-default-acc'].includes(act);
+  const guarded = ['fav', 'checkin', 'uncheckin', 'checkin-acc', 'uncheckin-acc', 'renew', 'undo-renew', 'move-up', 'move-down', 'del', 'duplicate', 'set-default-acc'].includes(act);
   if (guarded) btn.disabled = true;
   try {
     if (act === 'wantlogin') { openLogin(); return; }
+    /* v59：续期记录展开/收起（纯前端，不写数据） */
+    if (act === 'toggle-renew-hist') {
+      if (expandedRenewHistory.has(id)) expandedRenewHistory.delete(id);
+      else expandedRenewHistory.add(id);
+      renderExpiring();
+      return;
+    }
     /* v58：账号管理弹窗的打开/编辑/删除（弹窗本身不写数据，保存时才 PUT） */
     if (act === 'acc-manager') { openAccManager(id); return; }
     if (act === 'acc-edit') {
@@ -1146,6 +1191,17 @@ document.body.addEventListener('click', async (e) => {
       await loadAll();
     } else if (act === 'edit') {
       openModal(services.find((s) => s.id === id));
+    } else if (act === 'duplicate') {
+      /* v59：复制服务——服务端复制一份（名字后加“副本”），跳到新卡片 */
+      const r = await api(`/api/services/${id}/duplicate`, { method: 'POST' });
+      await loadAll();
+      toast('已复制一个服务');
+      const el = r?.id ? document.querySelector(`.card[data-id="${r.id}"]`) : null;
+      if (el) {
+        el.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'center' });
+        el.classList.add('card-flash');
+        setTimeout(() => el.classList.remove('card-flash'), 1500);
+      }
     } else if (act === 'del') {
       const svc = services.find((s) => s.id === id);
       if (confirm(`确定删除「${svc ? svc.name : ''}」？删除后不可恢复。`)) {
@@ -1536,6 +1592,24 @@ $('#btn-bulk-del').addEventListener('click', async () => {
   } catch (err) { handleAuthErr(err); }
   finally { b.disabled = false; }
 });
+/* v59：批量编辑——签到间隔 / 续期周期，空着的字段不动 */
+$('#btn-bulk-edit').addEventListener('click', async () => {
+  if (!bulkSel.size) { toast('先勾选要改的服务', 'bad'); return; }
+  const every = $('#bulk-every').value.trim();
+  const renew = $('#bulk-renew').value.trim();
+  if (!every && !renew) { toast('先填签到间隔或续期周期', 'bad'); return; }
+  const b = $('#btn-bulk-edit');
+  if (b.disabled) return;
+  b.disabled = true;
+  try {
+    const r = await api('/api/services/bulk', { method: 'POST', body: JSON.stringify({ ids: [...bulkSel], action: 'edit', checkinEveryDays: every, renewDays: renew }) });
+    $('#bulk-every').value = '';
+    $('#bulk-renew').value = '';
+    await loadAll();
+    toast(`已更新 ${r.updated} 个服务`);
+  } catch (err) { handleAuthErr(err); }
+  finally { b.disabled = false; }
+});
 
 $('#btn-linkcheck').addEventListener('click', async (e) => {
   const btn = e.currentTarget;
@@ -1783,6 +1857,65 @@ const calUrl = location.origin + '/api/calendar.ics';
 const calUrlEl = document.getElementById('cal-url');
 if (calUrlEl) calUrlEl.textContent = calUrl;
 document.getElementById('btn-copy-cal')?.addEventListener('click', async () => { await copyText(calUrl); toast('订阅链接已复制'); });
+
+/* v59：API 令牌（给 iOS 快捷指令用）——令牌只在生成那一刻显示一次，平时只告诉你有没有；
+   令牌只放进内存变量，不存 localStorage，刷新页面就没了（要再看就重新生成） */
+let apiTokenShown = '';
+async function refreshApiTokenStatus() {
+  if (!live()) return;
+  try {
+    const r = await api('/api/api-token/status');
+    $('#apitoken-status').textContent = r.hasToken ? '已有令牌' : '还没生成令牌';
+    $('#btn-apitoken-gen').textContent = r.hasToken ? '重新生成令牌' : '生成令牌';
+  } catch { /* 未登录时不显示 */ }
+}
+function setApiTokenExample(tok) {
+  const url = `${location.origin}/api/checkins/all?token=${tok}`;
+  const curl = `curl -X POST "${location.origin}/api/checkins/all" -H "Authorization: Bearer ${tok}"`;
+  const urlEl = $('#apitoken-url');
+  if (urlEl) urlEl.textContent = url;
+  const curlEl = $('#apitoken-curl');
+  if (curlEl) curlEl.textContent = curl;
+}
+$('#btn-apitoken-gen')?.addEventListener('click', async () => {
+  const b = $('#btn-apitoken-gen');
+  if (b.disabled) return;
+  b.disabled = true;
+  try {
+    const r = await api('/api/api-token', { method: 'POST' });
+    apiTokenShown = r.token || '';
+    $('#apitoken-value').textContent = apiTokenShown;
+    $('#btn-copy-apitoken').disabled = !apiTokenShown;
+    $('#apitoken-status').textContent = '已有令牌';
+    b.textContent = '重新生成令牌';
+    setApiTokenExample(apiTokenShown);
+    toast('令牌已生成，只显示这一次，记得复制保存');
+  } catch (err) { handleAuthErr(err); }
+  finally { b.disabled = false; }
+});
+$('#btn-copy-apitoken')?.addEventListener('click', async () => {
+  if (!apiTokenShown) return;
+  await copyText(apiTokenShown);
+  toast('令牌已复制');
+});
+$('#btn-apitoken-revoke')?.addEventListener('click', async () => {
+  if (!confirm('确定作废这个令牌？作废后用它做的快捷指令就签不了到了。')) return;
+  const b = $('#btn-apitoken-revoke');
+  if (b.disabled) return;
+  b.disabled = true;
+  try {
+    await api('/api/api-token/revoke', { method: 'POST' });
+    apiTokenShown = '';
+    $('#apitoken-value').textContent = '还没生成令牌';
+    $('#btn-copy-apitoken').disabled = true;
+    $('#apitoken-status').textContent = '还没生成令牌';
+    $('#btn-apitoken-gen').textContent = '生成令牌';
+    setApiTokenExample('你的令牌');
+    toast('令牌已作废');
+  } catch (err) { handleAuthErr(err); }
+  finally { b.disabled = false; }
+});
+setApiTokenExample('你的令牌');
 
 /* 数字滚动 */
 function countUp(el, val) {
