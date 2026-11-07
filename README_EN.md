@@ -10,12 +10,14 @@
 
 Pure Node.js with **zero dependencies** (no `npm install`), data lives in a single local `data.json`, one command to deploy.
 
+🌐 **Live demo**: [web.jasonsun.us](https://web.jasonsun.us) — the author's own hub. The public landing page (site list and check-ins) is visible without logging in; personal data behind the login (accounts, notes, notification settings) stays private.
+
 > ⭐ If this project is useful to you, please give it a Star. To support continued development, see [Sponsor](#️-sponsor) at the bottom.
 
 ## ✨ Features
 
 ### Service management
-- **CRUD**: name, category, URL, account, password/secret, price, notes
+- **CRUD**: name, category, URL, account, password/secret, price, notes; a service can hold multiple accounts (main/alt) — expand the card to one-tap copy credentials and jump to the site
 - **Manageable categories**: custom categories (rename, change icon); only empty custom categories can be deleted
 - **Favorites**: star services, a "★ My Favorites" section on the home page; the "Favorites" category groups in too
 - **Bulk mode**: select multiple services, move them to another category or delete them at once
