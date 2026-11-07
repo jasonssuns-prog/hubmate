@@ -336,7 +336,7 @@ function publicServices(data) {
     favorite: !!s.favorite,
     abnormal: !!s.abnormal,
     checkins: s.checkins || [],
-    hasAccount: !!s.account,
+    hasAccount: (Array.isArray(s.accounts) && s.accounts.length > 0) || !!s.account,
     visits: s.visits || 0,
     sortOrder: s.sortOrder ?? 0,
     notes: s.notes || ''
@@ -388,11 +388,14 @@ function loadData() {
     writeJSON(DATA_FILE, data);
   }
   ensureMeta(data);
-  /* 旧数据迁移：补齐排序与访问次数字段 */
+  /* 旧数据迁移：补齐排序与访问次数字段；单个账号迁成 accounts 数组 */
   let ndirty = false;
   data.services.forEach((s, i) => {
     if (typeof s.sortOrder !== 'number') { s.sortOrder = i; ndirty = true; }
     if (typeof s.visits !== 'number') { s.visits = 0; ndirty = true; }
+    const snap = JSON.stringify([s.accounts, s.account, s.secret]);
+    normalizeAccounts(s);
+    if (JSON.stringify([s.accounts, s.account, s.secret]) !== snap) ndirty = true;
   });
   if (ndirty) writeJSON(DATA_FILE, data);
   return data;
@@ -411,6 +414,32 @@ function currentUser(req) {
   if (!rec || Date.now() - rec.created > SESSION_MS) return null;
   return { token, sessions };
 }
+/* ---------- 多账号：一个服务可存多个账号（名字/账号/密码/备注），其中一个是默认 ---------- */
+function sanitizeAccount(a) {
+  if (!a || typeof a !== 'object') return null;
+  return {
+    id: String(a.id || crypto.randomBytes(6).toString('hex')).slice(0, 32),
+    label: String(a.label || '').trim().slice(0, 30) || '账号',
+    username: String(a.username || '').trim().slice(0, 200),
+    password: String(a.password || '').slice(0, 500),
+    notes: String(a.notes || '').trim().slice(0, 200),
+    isDefault: !!a.isDefault
+  };
+}
+/* 归一化：accounts 数组是唯一事实来源；account/secret 只做默认账号的镜像（兼容旧代码、CSV、台账） */
+function normalizeAccounts(svc) {
+  if (!Array.isArray(svc.accounts)) svc.accounts = [];
+  svc.accounts = svc.accounts.map(sanitizeAccount).filter(Boolean).slice(0, 20);
+  if (!svc.accounts.length && (svc.account || svc.secret)) {
+    svc.accounts.push({ id: crypto.randomBytes(6).toString('hex'), label: '默认', username: String(svc.account || ''), password: String(svc.secret || ''), notes: '', isDefault: true });
+  }
+  let def = svc.accounts.find((a) => a.isDefault);
+  if (!def && svc.accounts.length) { svc.accounts[0].isDefault = true; def = svc.accounts[0]; }
+  svc.accounts.forEach((a) => { if (a !== def) a.isDefault = false; });
+  svc.account = def ? def.username : '';
+  svc.secret = def ? def.password : '';
+  return svc;
+}
 function pickFields(b, existing, catIds) {
   const out = {};
   if (typeof b.name === 'string') out.name = b.name.trim().slice(0, 100);
@@ -425,7 +454,28 @@ function pickFields(b, existing, catIds) {
      服务会归拢进收藏栏。只改星标的请求、以及本来就是收藏分类的编辑，都尊重请求里的
      星标值，绝不强制改回、也绝不改分类 */
   if (b.category === 'fav' && (!existing || existing.category !== 'fav')) out.favorite = true;
-  for (const k of ['url', 'account', 'secret', 'price', 'notes', 'registeredAt', 'expiresAt']) {
+  /* 多账号：传了 accounts 数组就用它（默认账号同步到 account/secret）；只传了旧式
+     account/secret 就改默认账号（没有就新建一个）。account/secret 不再单独走下面的循环 */
+  if (Array.isArray(b.accounts)) {
+    out.accounts = b.accounts.map(sanitizeAccount).filter(Boolean).slice(0, 20);
+    const def = out.accounts.find((a) => a.isDefault) || out.accounts[0];
+    out.account = def ? def.username : '';
+    out.secret = def ? def.password : '';
+  } else if (b.account !== undefined || b.secret !== undefined) {
+    const base = Array.isArray(existing?.accounts) ? existing.accounts.map(sanitizeAccount).filter(Boolean) : [];
+    const acc = base.find((a) => a.isDefault) || base[0];
+    const username = typeof b.account === 'string' ? b.account.trim().slice(0, 200) : (acc ? acc.username : '');
+    const password = typeof b.secret === 'string' ? b.secret.slice(0, 500) : (acc ? acc.password : '');
+    if (acc) {
+      acc.username = username; acc.password = password;
+      out.accounts = base;
+    } else {
+      out.accounts = [{ id: crypto.randomBytes(6).toString('hex'), label: '默认', username, password, notes: '', isDefault: true }];
+    }
+    out.account = username;
+    out.secret = password;
+  }
+  for (const k of ['url', 'price', 'notes', 'registeredAt', 'expiresAt']) {
     if (typeof b[k] === 'string') out[k] = b[k].trim().slice(0, 500);
   }
   return out;

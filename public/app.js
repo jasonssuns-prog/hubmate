@@ -469,6 +469,22 @@ function cardBold(s) {
   return '点击标题直达官网';
 }
 
+/* 卡片上展开的账号面板：密码默认打码，点眼睛才显示；复制、设默认都在这 */
+const expandedAccounts = new Set();
+function accountsPanelHTML(s) {
+  const list = accountList(s);
+  const rows = list.map((a) => `<div class="acc-item">
+      <div class="acc-item-top"><b>${esc(a.label)}</b>${a.isDefault ? '<span class="acc-default-tag">★ 默认</span>' : `<button class="btn small ghost" data-act="set-default-acc" data-id="${s.id}" data-acc="${esc(a.id)}">设为默认</button>`}</div>
+      <div class="acc-line"><span class="acc-k">账号</span><span class="acc-v">${esc(a.username) || '<i class="muted">（空）</i>'}</span><button class="btn small ghost" data-act="copy-acc-user" data-id="${s.id}" data-acc="${esc(a.id)}">复制</button></div>
+      <div class="acc-line"><span class="acc-k">密码</span><span class="acc-v acc-pw">••••••</span><button class="btn small ghost" data-act="toggle-pw" data-id="${s.id}" data-acc="${esc(a.id)}">👁</button><button class="btn small ghost" data-act="copy-acc-pw" data-id="${s.id}" data-acc="${esc(a.id)}">复制</button></div>
+      ${a.notes ? `<div class="acc-note">${esc(a.notes)}</div>` : ''}
+    </div>`).join('');
+  return `<div class="acc-panel">
+    <div class="acc-panel-head"><b>👤 账号（${list.length}）</b>${s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener">直达网站 ↗</a>` : ''}<button class="btn small ghost" data-act="edit" data-id="${s.id}">✏️ 编辑账号</button></div>
+    ${rows || '<div class="empty">还没录账号，点“编辑账号”添加。</div>'}
+  </div>`;
+}
+
 function cardHTML(s, idx) {
   const cat = CATS[s.category] || CATS.relay;
   const num = String(idx + 1).padStart(2, '0');
@@ -503,6 +519,7 @@ function cardHTML(s, idx) {
             ? `<button class="btn small ok" data-act="uncheckin" data-id="${s.id}">↩ 撤回</button>`
             : (dueToday(s, todayStr())
               ? `<button class="btn small primary" data-act="checkin" data-id="${s.id}">签到</button>` : '')) : ''}
+        <button class="btn small ghost" data-act="toggle-accounts" data-id="${s.id}">👤 账号${accountList(s).length ? ` (${accountList(s).length})` : ''}</button>
         <button class="btn small ghost" data-act="edit" data-id="${s.id}">编辑</button>
         <button class="btn small ghost" data-act="move-up" data-id="${s.id}" title="上移">↑</button>
         <button class="btn small ghost" data-act="move-down" data-id="${s.id}" title="下移">↓</button>
@@ -522,6 +539,7 @@ function cardHTML(s, idx) {
     <div class="c-div"></div>
     <div class="c-note">${metaLine}</div>
     ${noteLines.map((l) => `<div class="c-note">${esc(l)}</div>`).join('')}
+    ${expandedAccounts.has(s.id) ? accountsPanelHTML(s) : ''}
     ${actions}
   </div>`;
 }
@@ -809,6 +827,56 @@ $('#btn-notify-test').addEventListener('click', async () => {
 function renderCatOptions() {
   $('#f-category').innerHTML = Object.entries(CATS).map(([id, c]) => `<option value="${id}">${esc(c.icon)} ${esc(c.label)}</option>`).join('');
 }
+/* 多账号：取服务的账号列表；老数据只有 account/secret 时当成一个默认账号 */
+function accountList(s) {
+  if (Array.isArray(s?.accounts) && s.accounts.length) return s.accounts;
+  if (s?.account || s?.secret) return [{ id: 'legacy', label: '默认', username: s.account || '', password: s.secret || '', notes: '', isDefault: true }];
+  return [];
+}
+function accRowHTML(a) {
+  return `<div class="acc-row" data-acc-id="${esc(a.id || '')}">
+    <div class="acc-row-top">
+      <input class="acc-label" placeholder="名字（如 主号）" value="${esc(a.label || '')}">
+      <label class="acc-default"><input type="radio" name="acc-default" ${a.isDefault ? 'checked' : ''}> 默认</label>
+      <button type="button" class="btn small ghost acc-del">删除</button>
+    </div>
+    <input class="acc-username" placeholder="账号" value="${esc(a.username || '')}">
+    <input class="acc-password" placeholder="密码 / 密钥" value="${esc(a.password || '')}">
+    <input class="acc-notes" placeholder="备注（可选）" value="${esc(a.notes || '')}">
+  </div>`;
+}
+function renderAccountsEditor(list) {
+  const box = $('#accounts-list');
+  if (!box) return;
+  const items = (list && list.length ? list : [{ id: '', label: '默认', username: '', password: '', notes: '', isDefault: true }]);
+  box.innerHTML = items.map((a) => accRowHTML(a)).join('');
+}
+function collectAccounts() {
+  const rows = [...document.querySelectorAll('#accounts-list .acc-row')];
+  const list = rows.map((r) => ({
+    id: r.dataset.accId || '',
+    label: (r.querySelector('.acc-label')?.value || '').trim().slice(0, 30) || '账号',
+    username: (r.querySelector('.acc-username')?.value || '').trim().slice(0, 200),
+    password: (r.querySelector('.acc-password')?.value || '').slice(0, 500),
+    notes: (r.querySelector('.acc-notes')?.value || '').trim().slice(0, 200),
+    isDefault: !!r.querySelector('input[name="acc-default"]')?.checked
+  })).filter((a) => a.username || a.password);
+  if (list.length && !list.some((a) => a.isDefault)) list[0].isDefault = true;
+  return list;
+}
+$('#btn-add-account').addEventListener('click', () => {
+  const box = $('#accounts-list');
+  if (!box) return;
+  const tmp = document.createElement('div');
+  tmp.innerHTML = accRowHTML({ id: '', label: '', username: '', password: '', notes: '', isDefault: false });
+  box.appendChild(tmp.firstElementChild);
+});
+$('#accounts-list').addEventListener('click', (e) => {
+  const del = e.target.closest('.acc-del');
+  if (!del) return;
+  const row = del.closest('.acc-row');
+  if (row) row.remove();
+});
 function openModal(svc) {
   editingId = svc ? svc.id : null;
   $('#modal-title').textContent = svc ? '编辑服务' : '添加服务';
@@ -816,8 +884,7 @@ function openModal(svc) {
   renderCatOptions();
   $('#f-category').value = (svc?.category && CATS[svc.category]) ? svc.category : 'relay';
   $('#f-url').value = svc?.url || '';
-  $('#f-account').value = svc?.account || '';
-  $('#f-secret').value = svc?.secret || '';
+  renderAccountsEditor(accountList(svc || {}));
   $('#f-registered').value = svc?.registeredAt || todayStr();
   $('#f-expires').value = svc?.expiresAt || '';
   expiryDirty = false; // 新开弹窗：到期日还没手动改过，可以自动填
@@ -871,10 +938,46 @@ document.body.addEventListener('click', async (e) => {
 
   /* 防连点：写数据的按钮点下去就禁用，直到请求 + 刷新完成；失败也恢复。
      只拦真正写数据的动作，打开弹窗/登录/查看密钥这种纯前端动作不拦 */
-  const guarded = ['fav', 'checkin', 'uncheckin', 'renew', 'undo-renew', 'move-up', 'move-down', 'del'].includes(act);
+  const guarded = ['fav', 'checkin', 'uncheckin', 'renew', 'undo-renew', 'move-up', 'move-down', 'del', 'set-default-acc'].includes(act);
   if (guarded) btn.disabled = true;
   try {
     if (act === 'wantlogin') { openLogin(); return; }
+    /* 多账号面板：展开/收起、复制、显示密码、设默认（纯前端动作不走 guarded，只有设默认写数据） */
+    if (act === 'toggle-accounts') {
+      if (expandedAccounts.has(id)) expandedAccounts.delete(id);
+      else expandedAccounts.add(id);
+      renderGrid();
+      return;
+    }
+    const findAcc = () => {
+      const svc = services.find((x) => x.id === id);
+      const acc = svc ? accountList(svc).find((a) => a.id === btn.dataset.acc) : null;
+      return { svc, acc };
+    };
+    if (act === 'copy-acc-user' || act === 'copy-acc-pw') {
+      const { acc } = findAcc();
+      if (!acc) return;
+      await copyText(act === 'copy-acc-user' ? acc.username : acc.password);
+      toast(act === 'copy-acc-user' ? '账号已复制' : '密码已复制');
+      return;
+    }
+    if (act === 'toggle-pw') {
+      const { acc } = findAcc();
+      if (!acc) return;
+      const span = btn.closest('.acc-line')?.querySelector('.acc-pw');
+      if (!span) return;
+      span.textContent = span.textContent === '••••••' ? (acc.password || '（空）') : '••••••';
+      return;
+    }
+    if (act === 'set-default-acc') {
+      const { svc, acc } = findAcc();
+      if (!svc || !acc) return;
+      const next = accountList(svc).map((a) => ({ ...a, isDefault: a.id === acc.id }));
+      await api(`/api/services/${id}`, { method: 'PUT', body: JSON.stringify({ accounts: next }) });
+      await loadAll();
+      toast(`已把「${acc.label}」设为默认账号`);
+      return;
+    }
     if (act === 'fav') {
       const svc = services.find((s) => s.id === id);
       if (!svc) return;
@@ -1024,8 +1127,7 @@ $('#modal-save').addEventListener('click', async () => {
     name: $('#f-name').value.trim(),
     category: $('#f-category').value,
     url: $('#f-url').value.trim(),
-    account: $('#f-account').value.trim(),
-    secret: $('#f-secret').value,
+    accounts: collectAccounts(),
     registeredAt: $('#f-registered').value,
     expiresAt: $('#f-expires').value,
     price: $('#f-price').value.trim(),

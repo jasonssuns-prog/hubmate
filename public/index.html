@@ -11,7 +11,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="apple-touch-icon" href="/icon-180.png">
-<link rel="stylesheet" href="/style.css?v=20261107-54">
+<link rel="stylesheet" href="/style.css?v=20261107-55">
 </head>
 <body class="mode-preview" data-theme="neon">
 
@@ -376,8 +376,10 @@
         </select>
       </label>
       <label class="span2">网址<input id="f-url" placeholder="https://…"></label>
-      <label>账号<input id="f-account"></label>
-      <label>密码 / 密钥 <i class="muted">(明文存本机)</i><input id="f-secret"></label>
+      <div class="span2" id="accounts-editor">
+        <div class="acc-head"><span>账号 <i class="muted">(可存多个，明文存本机)</i></span><button type="button" id="btn-add-account" class="btn small ghost">➕ 添加账号</button></div>
+        <div id="accounts-list"></div>
+      </div>
       <label>注册 / 购买日期<input id="f-registered" type="date"></label>
       <label>到期日<input id="f-expires" type="date"></label>
       <label>价格<input id="f-price" placeholder="如 $10/年"></label>
@@ -419,6 +421,6 @@
 </div>
 
 <div id="toast"></div>
-<script src="/app.js?v=20261107-54"></script>
+<script src="/app.js?v=20261107-55"></script>
 </body>
 </html>
