@@ -11,7 +11,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="apple-touch-icon" href="/icon-180.png">
-<link rel="stylesheet" href="/style.css?v=20261107-55">
+<link rel="stylesheet" href="/style.css?v=20261107-56">
 </head>
 <body class="mode-preview" data-theme="neon">
 
@@ -93,10 +93,12 @@
       <a href="#sec-checkin" class="nav-item"><i>⚡</i>今日签到</a>
       <a href="#sec-fav" class="nav-item live-only"><i>★</i>我的收藏</a>
       <a href="#sec-expiring" class="nav-item live-only"><i>⏰</i>临期提醒 <span class="nav-badge" id="expiring-nav-count"></span></a>
+      <a href="#sec-calendar" class="nav-item live-only"><i>📅</i>日历订阅</a>
       <a href="#sec-services" class="nav-item"><i>🗂️</i>服务台账</a>
       <a href="#sec-data" class="nav-item"><i>🏆</i>数据中心</a>
       <a href="#sec-notify" class="nav-item live-only"><i>🔔</i>通知设置</a>
       <a href="#sec-dupes" class="nav-item live-only"><i>♻️</i>重复清理</a>
+      <a href="#sec-pwreuse" class="nav-item live-only"><i>🔐</i>密码复用 <span class="nav-badge" id="pwreuse-nav-count"></span></a>
       <a href="#sec-cats" class="nav-item live-only"><i>🏷️</i>分类管理</a>
       <a href="#sec-notes" class="nav-item live-only"><i>📝</i>记事本</a>
     </nav>
@@ -107,6 +109,7 @@
         <button class="theme-dot d-ocean" data-theme="ocean" title="深海蓝"></button>
         <button class="theme-dot d-emerald" data-theme="emerald" title="翡翠绿"></button>
         <button class="theme-dot d-day" data-theme="day" title="日间浅色"></button>
+        <button class="theme-dot d-auto" data-theme="auto" title="跟随系统"></button>
       </div>
       <div class="user-card">
         <div class="avatar" id="avatar">·</div>
@@ -190,6 +193,13 @@
       <div id="checkin-list"><div class="skel"><i></i><i></i><i></i></div></div>
     </section>
 
+    <section class="panel live-only" id="sec-year">
+      <div class="panel-head">
+        <h2 id="year-title">📈 年度总结</h2>
+      </div>
+      <div id="year-list"></div>
+    </section>
+
     <section class="panel live-only" id="sec-fav">
       <div class="panel-head">
         <h2>★ 我的收藏管理</h2>
@@ -208,6 +218,19 @@
       <div id="expiring-list"></div>
       <div id="expiry-calendar"></div>
       <div id="cal-day-list"></div>
+    </section>
+
+    <section class="panel live-only" id="sec-calendar">
+      <div class="panel-head">
+        <h2>📅 日历订阅</h2>
+      </div>
+      <div class="help-fold"><button class="help-toggle" type="button">📖 说明 ▾</button><div class="help-body"><p class="muted">把到期日订阅到手机日历，所有服务的到期日自动出现在日历上，到期前 3 天和 1 天各提醒一次。订阅链接里只有服务名和到期日，不含账号密码；服务续期改了日期，日历下次抓取会自动更新。</p></div></div>
+      <div class="cal-sub-row"><code id="cal-url"></code><button class="btn small ghost" id="btn-copy-cal">复制链接</button></div>
+      <ol class="cal-steps">
+        <li>iPhone：<b>设置 → 日历 → 帐户 → 添加帐户 → 其他 → 添加已订阅的日历</b>，粘贴上面复制的链接，点“下一步”再点“存储”。</li>
+        <li>订阅成功后，打开日历就能看到每个服务的到期日（全天事件，标题是“服务到期：名字”）。</li>
+        <li>不想订阅了，在同一个地方点进这个已订阅的日历，拉到底点“删除帐户”。</li>
+      </ol>
     </section>
 
     <section class="panel live-only" id="sec-notify">
@@ -242,6 +265,15 @@
         <button id="btn-dup-scan" class="btn primary">扫描重复</button>
       </div>
       <div id="dupes-list"></div>
+    </section>
+
+    <section class="panel live-only" id="sec-pwreuse">
+      <div class="panel-head">
+        <h2>🔐 密码复用</h2>
+        <span id="pwreuse-count" class="muted"></span>
+      </div>
+      <div class="help-fold"><button class="help-toggle" type="button">📖 说明 ▾</button><div class="help-body"><p class="muted">同一个密码用在多个账号上，一个站泄露了，其他站也跟着危险。下面按密码分组列出，点眼睛看密码原文，建议给这些账号换成不同的密码。只统计已录进来的账号，没录的不算。</p></div></div>
+      <div id="pwreuse-list"></div>
     </section>
 
     <section class="panel live-only" id="sec-cats">
@@ -421,6 +453,6 @@
 </div>
 
 <div id="toast"></div>
-<script src="/app.js?v=20261107-55"></script>
+<script src="/app.js?v=20261107-56"></script>
 </body>
 </html>

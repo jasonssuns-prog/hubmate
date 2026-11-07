@@ -350,7 +350,7 @@ function renderAll() {
 
   renderBanner();
   if (!live()) renderLanding();
-  else { renderFav(); renderExpiring(); }
+  else { renderFav(); renderExpiring(); renderPwReuse(); renderYearReview(); }
   const sb = $('#sec-banner');
   if (live() && meta.passwordIsDefault) {
     sb.innerHTML = '🔒 当前还是初始默认密码，部署到服务器前务必点右上角「改密码」换掉！';
@@ -969,6 +969,14 @@ document.body.addEventListener('click', async (e) => {
       span.textContent = span.textContent === '••••••' ? (acc.password || '（空）') : '••••••';
       return;
     }
+    if (act === 'toggle-dup-pw') {
+      const g = dupPwGroups[parseInt(btn.dataset.dupIdx, 10)];
+      if (!g) return;
+      const span = btn.closest('.panel-head')?.querySelector('.acc-pw');
+      if (!span) return;
+      span.textContent = span.textContent === '••••••' ? g.pw : '••••••';
+      return;
+    }
     if (act === 'set-default-acc') {
       const { svc, acc } = findAcc();
       if (!svc || !acc) return;
@@ -1454,6 +1462,69 @@ function scanDupes() {
   `).join('');
 }
 $('#btn-dup-scan').addEventListener('click', scanDupes);
+
+/* 密码复用：同一个密码用在多个账号上就成一组（只统计已录进来的账号，空密码不算） */
+let dupPwGroups = [];
+function findDupPasswords() {
+  const byPw = new Map();
+  for (const s of services) {
+    for (const a of accountList(s)) {
+      const pw = (a.password || '').trim();
+      if (!pw) continue;
+      if (!byPw.has(pw)) byPw.set(pw, []);
+      byPw.get(pw).push({ service: s.name, serviceId: s.id, label: a.label, username: a.username });
+    }
+  }
+  return [...byPw.entries()].filter(([, list]) => list.length > 1)
+    .map(([pw, list]) => ({ pw, list }))
+    .sort((a, b) => b.list.length - a.list.length);
+}
+function renderPwReuse() {
+  const box = $('#pwreuse-list');
+  if (!box) return;
+  dupPwGroups = findDupPasswords();
+  const total = dupPwGroups.reduce((n, g) => n + g.list.length, 0);
+  const badge = $('#pwreuse-nav-count');
+  if (badge) badge.textContent = dupPwGroups.length ? dupPwGroups.length : '';
+  $('#pwreuse-count').textContent = dupPwGroups.length ? `${dupPwGroups.length} 组重复 · 涉及 ${total} 个账号` : '';
+  if (!dupPwGroups.length) { box.innerHTML = '<p class="muted">没有发现重复密码 ✓ 每个账号的密码都不一样，很安全。</p>'; return; }
+  box.innerHTML = dupPwGroups.map((g, i) => `
+    <div class="panel-head" style="margin-top:14px"><h3 style="font-size:15px">密码 <span class="acc-pw">••••••</span> <button class="btn small ghost" data-act="toggle-dup-pw" data-dup-idx="${i}">👁</button></h3><span class="muted">${g.list.length} 个账号在用</span></div>
+    ${g.list.map((u) => `<div class="landing-checkin-item"><span class="ck">🔐</span><span class="ck-name">${esc(u.service)}</span><span class="ck-note">${esc(u.label)}${u.username ? ' · ' + esc(u.username) : ''}</span><button class="btn small ghost" data-act="edit" data-id="${u.serviceId}">编辑</button></div>`).join('')}
+  `).join('');
+}
+
+/* 年度总结：今年的签到天数、总次数、签到攒的经验（每天首次 +5、全勤 +10，都记在 history 里）、
+   最常签到的服务、收录数、收藏数 */
+function renderYearReview() {
+  const box = $('#year-list');
+  if (!box) return;
+  const y = String(new Date().getFullYear());
+  const hist = meta.history || {};
+  let days = 0, xp = 0;
+  for (const [d, h] of Object.entries(hist)) {
+    if (!d.startsWith(y + '-')) continue;
+    if ((h.c || 0) > 0) days++;
+    xp += (h.x || 0) + (h.all ? 10 : 0);
+  }
+  let totalCk = 0, top = null, topN = 0;
+  for (const s of services) {
+    const n = (s.checkins || []).filter((d) => d.startsWith(y + '-')).length;
+    totalCk += n;
+    if (n > topN) { topN = n; top = s; }
+  }
+  const favs = services.filter(isFav).length;
+  $('#year-title').textContent = `📈 ${y} 年总结`;
+  box.innerHTML = `
+    <div class="year-grid">
+      <div class="year-stat"><b>${days}</b><span>签到天数</span></div>
+      <div class="year-stat"><b>${totalCk}</b><span>总签到次数</span></div>
+      <div class="year-stat"><b>${xp}⚡</b><span>签到攒的经验</span></div>
+      <div class="year-stat"><b>${top ? esc(top.name) : '—'}</b><span>最常签到${top ? `（${topN} 次）` : ''}</span></div>
+      <div class="year-stat"><b>${services.length}</b><span>收录服务</span></div>
+      <div class="year-stat"><b>${favs}</b><span>收藏</span></div>
+    </div>`;
+}
 $('#dupes-list').addEventListener('click', async (e) => {
   const btn = e.target.closest('[data-dup-del]');
   if (!btn) return;
@@ -1557,10 +1628,18 @@ const THEMES = {
   day: { particles: ['124,58,237', '8,145,178', '219,39,119'] }
 };
 let particleColors = THEMES.neon.particles;
+/* 跟随系统：auto 时按 iOS 系统深色/浅色解析（浅色→day，深色→neon），系统切换时自动跟 */
+function effectiveTheme(name) {
+  if (name === 'auto') return window.matchMedia('(prefers-color-scheme: light)').matches ? 'day' : 'neon';
+  return THEMES[name] ? name : 'neon';
+}
+let currentTheme = 'neon';
 function applyTheme(name, save) {
-  if (!THEMES[name]) name = 'neon';
-  document.body.dataset.theme = name;
-  particleColors = THEMES[name].particles;
+  if (!THEMES[name] && name !== 'auto') name = 'neon';
+  currentTheme = name;
+  const eff = effectiveTheme(name);
+  document.body.dataset.theme = eff;
+  particleColors = THEMES[eff].particles;
   document.querySelectorAll('.theme-dot').forEach((d) => d.classList.toggle('on', d.dataset.theme === name));
   if (save) try { localStorage.setItem('sh-theme', name); } catch {}
   const cs = getComputedStyle(document.body);
@@ -1570,14 +1649,23 @@ function applyTheme(name, save) {
   if (stops[0] && g2) stops[0].setAttribute('stop-color', g2);
   if (stops[1] && g3) stops[1].setAttribute('stop-color', g3);
   /* 手机浏览器顶栏颜色跟主题走 */
-  const themeColor = { neon: '#08040f', ocean: '#020a16', emerald: '#02120c', day: '#eef1f7' }[name];
+  const themeColor = { neon: '#08040f', ocean: '#020a16', emerald: '#02120c', day: '#eef1f7' }[eff];
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta && themeColor) meta.setAttribute('content', themeColor);
   drawTrend();
 }
+window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => {
+  if (currentTheme === 'auto') applyTheme('auto', false);
+});
 document.querySelectorAll('.theme-dot').forEach((d) =>
   d.addEventListener('click', () => applyTheme(d.dataset.theme, true)));
 applyTheme((() => { try { return localStorage.getItem('sh-theme'); } catch { return null; } })() || 'neon');
+
+/* 日历订阅：链接就是本站 origin + /api/calendar.ics，复制后去 iPhone 日历里订阅 */
+const calUrl = location.origin + '/api/calendar.ics';
+const calUrlEl = document.getElementById('cal-url');
+if (calUrlEl) calUrlEl.textContent = calUrl;
+document.getElementById('btn-copy-cal')?.addEventListener('click', async () => { await copyText(calUrl); toast('订阅链接已复制'); });
 
 /* 数字滚动 */
 function countUp(el, val) {

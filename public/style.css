@@ -211,6 +211,7 @@ a:hover { text-decoration: underline; }
 .theme-dot.d-ocean { background: linear-gradient(135deg, #2563eb, #22d3ee); }
 .theme-dot.d-emerald { background: linear-gradient(135deg, #059669, #a3e635); }
 .theme-dot.d-day { background: linear-gradient(135deg, #f8fafc, #cbd5e1); }
+.theme-dot.d-auto { background: linear-gradient(90deg, #08040f 50%, #f8fafc 50%); }
 .theme-dot:hover { transform: scale(1.2); }
 .theme-dot.on { border-color: rgba(255, 255, 255, .85); box-shadow: 0 0 14px rgba(255, 255, 255, .3); }
 
@@ -614,6 +615,15 @@ a:hover { text-decoration: underline; }
 .acc-k { color: var(--muted); flex-shrink: 0; }
 .acc-v { flex: 1; min-width: 0; word-break: break-all; }
 .acc-note { font-size: 12px; color: var(--muted); }
+/* 日历订阅 */
+.cal-sub-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cal-sub-row code { flex: 1; min-width: 0; word-break: break-all; font-size: 13px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+.cal-steps { margin: 4px 0 0; padding-left: 20px; font-size: 13px; line-height: 1.7; color: var(--text); display: flex; flex-direction: column; gap: 6px; }
+/* 年度总结 */
+.year-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.year-stat { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 12px 6px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); text-align: center; }
+.year-stat b { font-size: 20px; font-weight: 800; word-break: break-all; }
+.year-stat span { font-size: 12px; color: var(--muted); }
 .c-title a { color: var(--text); transition: color .12s, text-shadow .12s; }
 .c-title a:hover { color: #fff; text-decoration: none; text-shadow: 0 0 18px color-mix(in srgb, var(--g2) 50%, transparent); }
 .arrow { color: var(--accent-2); font-size: 14px; margin-left: 2px; }

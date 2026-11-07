@@ -20,6 +20,7 @@ Pure Node.js with **zero dependencies** (no `npm install`), data lives in a sing
 - **CRUD**: name, category, URL, account, password/secret, price, notes; a service can hold multiple accounts (main/alt) — expand the card to one-tap copy credentials and jump to the site
 - **Manageable categories**: custom categories (rename, change icon); only empty custom categories can be deleted
 - **Favorites**: star services, a "★ My Favorites" section on the home page; the "Favorites" category groups in too
+- **Password reuse warning**: if the same password is used on multiple accounts, it is flagged (grouped by password, tap the eye to reveal it) so you can change them to different ones
 - **Bulk mode**: select multiple services, move them to another category or delete them at once
 - **Reorder**: move cards up / down, your order stays
 - **Duplicate cleanup**: finds services with the same name or domain, clean them up in one place
@@ -41,6 +42,7 @@ Pure Node.js with **zero dependencies** (no `npm install`), data lives in a sing
 - **Undo renewal**: renewed by mistake? Undo restores the previous expiry date
 - **Cycle auto-fill**: expiry = registration/purchase date + renewal cycle — change either one and the other fills in; renewing also moves the start date to the new cycle start so the loop keeps going (a manually edited expiry is never auto-overwritten)
 - **Expiry only changes the record**: the renew button only edits the date here — it does not pay the vendor for you
+- **Calendar subscription**: a public `.ics` feed (`/api/calendar.ics`) — subscribe in your phone calendar and every expiry shows up automatically, with reminders 3 days and 1 day before; it contains only service names and expiry dates, no accounts or passwords
 
 ### Notepad
 - A private notepad, visible only after login — **never shown on the pre-login home page**
@@ -58,6 +60,10 @@ Pure Node.js with **zero dependencies** (no `npm install`), data lives in a sing
 - **Export ledger**: generates a `服务台账.md` (service ledger) for easy reading
 - **Login captcha**: built-in image captcha (one-time, 5-minute expiry, checked before the password) + per-IP rate limiting (10 attempts / 10 min)
 - **Security headers + CSP, gzip, ETag caching**, systemd sandbox running as a low-privilege user
+
+### Data & themes
+- **Year in review**: a card for the year — check-in days, total check-ins, XP earned from check-ins, and your most-checked-in service
+- **Follow system theme**: a 5th theme dot, "Follow system", that switches light/dark automatically with your phone's system setting
 
 ### Mobile friendly
 - Mobile layout: collapsible panel help texts and category groups, back-to-top button only appears when scrolling up

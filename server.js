@@ -925,6 +925,33 @@ async function handleAPI(req, res, pathname) {
     return send(200, payload);
   }
 
+  /* ---------- 到期日历订阅：公开的 .ics（只有名字+到期日，和公开接口里的一样，不含账号密码） ----------
+     iPhone 日历订阅后自动显示所有到期日，到期前 3 天和 1 天各提醒一次；服务续期后改了日期，
+     日历下次抓取会自动更新（UID 是服务 id，稳定不变） */
+  if (pathname === '/api/calendar.ics' && req.method === 'GET') {
+    const data = loadData();
+    const escICS = (s) => String(s || '').replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
+    const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+    const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//HubMate//Expiry Calendar//EN', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH', 'X-WR-CALNAME:HubMate 服务到期日'];
+    for (const s of data.services) {
+      if (!s.expiresAt || !/^\d{4}-\d{2}-\d{2}$/.test(s.expiresAt)) continue;
+      lines.push('BEGIN:VEVENT');
+      lines.push('UID:' + s.id + '@hubmate');
+      lines.push('DTSTAMP:' + stamp);
+      lines.push('DTSTART;VALUE=DATE:' + s.expiresAt.replace(/-/g, ''));
+      lines.push('SUMMARY:' + escICS('服务到期：' + s.name));
+      lines.push('DESCRIPTION:' + escICS(`注册 ${s.registeredAt || '—'}，续期周期 ${s.renewDays ?? 365} 天${s.url ? '，' + s.url : ''}`));
+      lines.push('BEGIN:VALARM', 'TRIGGER:-P3D', 'ACTION:DISPLAY', 'DESCRIPTION:' + escICS('服务到期提醒：' + s.name), 'END:VALARM');
+      lines.push('BEGIN:VALARM', 'TRIGGER:-P1D', 'ACTION:DISPLAY', 'DESCRIPTION:' + escICS('服务到期提醒：' + s.name), 'END:VALARM');
+      lines.push('END:VEVENT');
+    }
+    lines.push('END:VCALENDAR');
+    const buf = Buffer.from(lines.join('\r\n'), 'utf8');
+    res.writeHead(200, Object.assign({ 'Content-Type': 'text/calendar; charset=utf-8', 'Cache-Control': 'no-store' }, SEC_HEADERS));
+    res.end(buf);
+    return;
+  }
+
   const auth = currentUser(req);
   if (!auth) return send(401, { error: '未登录' });
 
