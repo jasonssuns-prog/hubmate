@@ -59,6 +59,11 @@ meta.push(['githubBackup', JSON.stringify(data.githubBackup || {})]);
 meta.push(['totpEnabled', JSON.stringify(!!data.totpEnabled)]);
 if (data.apiToken) meta.push(['apiToken', data.apiToken]);
 if (data.totpSecret) meta.push(['totpSecret', data.totpSecret]);
+/* v65：共享账号库、月度报告、归档记录、登录历史也一并搬（Node 版 v65 之后 data.json 里有这些字段） */
+if (Array.isArray(data.sharedAccounts)) meta.push(['sharedAccounts', JSON.stringify(data.sharedAccounts)]);
+if (Array.isArray(data.monthlyReports)) meta.push(['monthlyReports', JSON.stringify(data.monthlyReports.slice(-12))]);
+if (Array.isArray(data.archivedLog)) meta.push(['archivedLog', JSON.stringify(data.archivedLog.slice(-50))]);
+if (Array.isArray(data.loginHistory)) meta.push(['loginHistory', JSON.stringify(data.loginHistory.slice(-50))]);
 /* 同步配置（syncToken/syncPeers/syncLast）故意不搬：Workers 是全球一份部署，不需要多服务器同步 */
 for (let i = 0; i < meta.length; i += 40) {
   const part = meta.slice(i, i + 40);

@@ -36,6 +36,7 @@ const QUOTES = [
 ];
 
 let mode = 'preview', me = null, services = [], meta = null, filter = 'all', q = '', editingId = null, tagFilter = null;
+let vault = []; // v65：共享账号库（GET /api/vault 拿到，只在登录后加载）
 /* 星标和分类是两回事，互不干涉：收藏栏只看星标，分类只决定它分在哪个组里。
    选“收藏”分类保存时，服务器会在“新进收藏分类”那一刻顺带点上星，所以它会进收藏栏；
    之后取消星标，只会让它离开收藏栏，分类保持不动。 */
@@ -113,9 +114,10 @@ function dayDiff(a, b) {
   const [by, bm, bd] = b.split('-').map(Number);
   return Math.round((Date.UTC(by, bm - 1, bd) - Date.UTC(ay, am - 1, ad)) / 86400e3);
 }
-/* 今天该不该签：没签过就是到期；上次签到距今满间隔天数才到期 */
+/* 今天该不该签：没签过就是到期；上次签到距今满间隔天数才到期
+   v65：已归档的服务不进签到队列 */
 function dueToday(s, t) {
-  if (s.checkinFrequency !== 'daily' || s.category === 'idle') return false;
+  if (s.checkinFrequency !== 'daily' || s.category === 'idle' || s.category === 'archived') return false;
   const c = (s.checkins || []).filter(Boolean).sort();
   if (!c.length) return true;
   return dayDiff(c[c.length - 1], t) >= everyDays(s);
@@ -168,6 +170,86 @@ function healthScore(s) {
 }
 function healthClass(score) {
   return score === null ? '' : (score >= 80 ? 'b-ok' : (score >= 50 ? 'b-warn' : 'b-bad'));
+}
+/* v65：账号安全评分（0–100，纯函数）。规则：长度 <8 扣 25、8–11 扣 12、12–15 扣 5；
+   大写/小写/数字/符号每缺一类扣 5；密码在多个账号上复用扣 30；上次改密超过 90 天扣 20
+   （复用与超期的权重比 3:2，和 Node 版同一套规则）；没填 passwordChangedAt 按“未知”
+   处理不扣分；没填密码直接 0 分。 */
+function accountSecurityScore(acc, allAccounts) {
+  const pw = String(acc?.password || '');
+  if (!pw) return 0;
+  let score = 100;
+  if (pw.length < 8) score -= 25;
+  else if (pw.length < 12) score -= 12;
+  else if (pw.length < 16) score -= 5;
+  if (!/[A-Z]/.test(pw)) score -= 5;
+  if (!/[a-z]/.test(pw)) score -= 5;
+  if (!/[0-9]/.test(pw)) score -= 5;
+  if (!/[^A-Za-z0-9]/.test(pw)) score -= 5;
+  const all = allAccounts || [];
+  if (all.length && all.filter((a) => a && String(a.password || '') === pw).length > 1) score -= 30;
+  const changed = String(acc?.passwordChangedAt || '');
+  if (/^\d{4}-\d{2}-\d{2}$/.test(changed) && dayDiff(changed, todayStr()) > 90) score -= 20;
+  return Math.max(0, score);
+}
+/* v65：账号安全的弱点清单（给卡片/弹窗/面板展示用） */
+function securityReasons(acc, allAccounts) {
+  const out = [];
+  const pw = String(acc?.password || '');
+  if (!pw) return ['没填密码'];
+  if (pw.length < 8) out.push('密码太短（<8 位）');
+  else if (pw.length < 12) out.push('密码偏短（<12 位）');
+  const missing = [];
+  if (!/[A-Z]/.test(pw)) missing.push('大写');
+  if (!/[a-z]/.test(pw)) missing.push('小写');
+  if (!/[0-9]/.test(pw)) missing.push('数字');
+  if (!/[^A-Za-z0-9]/.test(pw)) missing.push('符号');
+  if (missing.length) out.push('缺' + missing.join('、'));
+  const all = allAccounts || [];
+  if (all.length && all.filter((a) => a && String(a.password || '') === pw).length > 1) out.push('多处复用');
+  const changed = String(acc?.passwordChangedAt || '');
+  if (/^\d{4}-\d{2}-\d{2}$/.test(changed) && dayDiff(changed, todayStr()) > 90) out.push(`超 ${dayDiff(changed, todayStr())} 天没换`);
+  else if (!changed) out.push('改密时间未知');
+  return out;
+}
+function securityClass(score) {
+  return score === null ? '' : (score >= 80 ? 'b-ok' : (score >= 50 ? 'b-warn' : 'b-bad'));
+}
+/* v65：本月在线率（linkHistory 里当月的探活记录；没有记录返回 null，和服务端 uptimeInMonth 一致） */
+function monthlyUptime(svc, yearMonth) {
+  const hist = (Array.isArray(svc?.linkHistory) ? svc.linkHistory : []).filter((h) => h && typeof h.t === 'number' && typeof h.ok === 'boolean');
+  if (!hist.length) return null;
+  const [y, m] = yearMonth.split('-').map(Number);
+  const start = Date.UTC(y, m - 1, 1), end = Date.UTC(y, m, 1);
+  const inMonth = hist.filter((h) => h.t >= start && h.t < end);
+  if (!inMonth.length) return null;
+  return { rate: Math.round((inMonth.filter((h) => h.ok).length / inMonth.length) * 100), count: inMonth.length };
+}
+/* v65：证书还剩几天到期（没有证书信息返回 null） */
+function certDays(svc) {
+  if (!svc?.certExpiresAt) return null;
+  return dayDiff(todayStr(), svc.certExpiresAt);
+}
+/* v65：智能分类推荐——按域名和名称关键词匹配内置规则表（前端常量，服务端不改）。
+   返回 {category: 建议的分类名, tags: [建议标签]}；category 是显示名（可能是自定义分类，
+   应用时若不存在就新建）。 */
+const CATEGORY_RULES = [
+  { keys: ['github', 'gitlab', 'gitee', 'stackoverflow', 'codepen', 'sourcegraph'], category: '开发', tags: ['开发', '代码'] },
+  { keys: ['vps', 'vultr', 'linode', 'digitalocean', 'aws', 'aliyun', '阿里云', 'tencent', '腾讯云', 'oracle', 'cloud', '云', '服务器', 'host', 'bandwagon', 'racknerd'], category: 'VPS/服务器', tags: ['VPS', '云服务'] },
+  { keys: ['mail', 'gmail', 'outlook', '邮箱', '163.com', 'qq.com', 'protonmail'], category: '邮箱', tags: ['邮箱'] },
+  { keys: ['video', 'youtube', 'bilibili', 'netflix', 'youku', 'iqiyi', '视频', 'vimeo', 'twitch'], category: '视频', tags: ['视频'] },
+  { keys: ['bank', '银行', 'alipay', '支付宝', 'wechatpay', '微信支付', 'paypal', 'pay', '支付', 'stripe'], category: '支付', tags: ['支付', '金融'] },
+  { keys: ['chatgpt', 'openai', 'claude', 'gemini', 'midjourney', 'copilot', 'ai', '人工智能', 'deepseek'], category: 'AI', tags: ['AI'] },
+  { keys: ['game', 'steam', 'epicgames', 'psn', 'xbox', 'nintendo', '游戏', 'playstation'], category: '游戏', tags: ['游戏'] },
+  { keys: ['shop', 'taobao', '淘宝', 'jd.com', '京东', 'amazon', 'pinduoduo', '拼多多', '商城', '购物', 'ebay'], category: '购物', tags: ['购物'] }
+];
+function suggestCategory(url, name) {
+  const hay = `${url || ''} ${name || ''}`.toLowerCase();
+  if (!hay.trim()) return null;
+  for (const r of CATEGORY_RULES) {
+    if (r.keys.some((k) => hay.includes(k.toLowerCase()))) return { category: r.category, tags: [...r.tags] };
+  }
+  return { category: '其他', tags: [] };
 }
 /* 下次签到（只给间隔 > 1 天的服务显示）：没签过就是今天；否则上次签到 + 间隔天数；算出来已过期的也算今天 */
 function nextCheckinLabel(s, t) {
@@ -298,6 +380,8 @@ async function api(url, opts = {}) {
 /* ---------- 数据 ---------- */
 async function loadAll() {
   [services, meta] = await Promise.all([api('/api/services'), api('/api/meta')]);
+  /* v65：共享账号库（失败不拦主流程，比如旧服务端还没这接口） */
+  try { const v = await api('/api/vault'); vault = Array.isArray(v.accounts) ? v.accounts : []; } catch { vault = []; }
   me = { username: meta.username };
   mode = 'live';
   setCats(meta.categories);
@@ -306,6 +390,13 @@ async function loadAll() {
   loadNotes();
   if (dupesScanned) scanDupes(); // 删/改后数据变了，重复列表跟着刷新
   renderCats(); // 分类列表每次登录后都渲染，别再用“先触发后渲染”那套
+}
+/* v65：全站所有账号摊平（服务账号 + 共享账号库），给密码复用/安全评分做对照 */
+function allAccounts() {
+  const out = [];
+  for (const s of services) for (const a of accountList(s)) out.push(a);
+  for (const v of vault) out.push(v);
+  return out;
 }
 async function loadPreview() {
   const pub = await fetch('/api/public').then((r) => { if (!r.ok) throw new Error('fail'); return r.json(); });
@@ -400,7 +491,7 @@ function renderAll() {
 
   renderBanner();
   if (!live()) renderLanding();
-  else { renderFav(); renderExpiring(); renderPwReuse(); renderYearReview(); renderUptime(); refreshApiTokenStatus(); refreshTotpStatus(); refreshGithubStatus(); }
+  else { renderFav(); renderExpiring(); renderPwReuse(); renderYearReview(); renderUptime(); renderVault(); renderSecScore(); renderRotate(); renderMonthly(); renderAvail(); refreshApiTokenStatus(); refreshTotpStatus(); refreshGithubStatus(); loadLogins(); }
   const sb = $('#sec-banner');
   if (live() && meta.passwordIsDefault) {
     sb.innerHTML = '🔒 当前还是初始默认密码，部署到服务器前务必点右上角「改密码」换掉！';
@@ -575,6 +666,18 @@ function cardHTML(s, idx) {
     ? `<div class="c-note">${(s.customFields || []).map((f) => `${esc(f.k)}：${esc(f.v)}`).join(' · ')}</div>` : '';
   const health = healthScore(s);
   const healthBadge = health !== null ? `<span class="badge ${healthClass(health)}" title="健康分：在线率 + 到期远近 + 签到 + 死链">💚 ${health}</span>` : '';
+  /* v65：证书到期徽章（<30 天标红；只在登录后显示） */
+  const cd = certDays(s);
+  const certBadge = live() && cd !== null && cd < 30
+    ? `<span class="badge ${cd < 0 ? 'b-bad' : 'b-warn'}" title="SSL 证书到期日 ${esc(s.certExpiresAt || '')}">${cd < 0 ? `🔒 证书已过期 ${-cd} 天` : `🔒 证书 ${cd} 天后到期`}</span>` : '';
+  /* v65：账号安全——这个服务里最弱的账号分数 <60 才亮红灯（只在登录后显示） */
+  const accs = accountList(s);
+  let secBadge = '';
+  if (live() && accs.length) {
+    const all = allAccounts();
+    const worst = Math.min(...accs.map((a) => accountSecurityScore(a, all)));
+    if (worst < 60) secBadge = `<span class="badge b-bad" title="这个服务有个账号密码不安全（${worst} 分），点 👤 账号进去看">🔐 ${worst} 分</span>`;
+  }
   const tagChips = (s.tags || []).map((t) => `<button class="tag-chip" data-tag="${esc(t)}" title="只看带“${esc(t)}”标签的服务">${esc(t)}</button>`).join('');
   const nextCk = nextCheckinLabel(s, todayStr());
   const lastRenew = (s.renewHistory || []).length ? s.renewHistory[s.renewHistory.length - 1].at : '';
@@ -595,7 +698,7 @@ function cardHTML(s, idx) {
     ? `<div class="card-acts">
         ${bulkMode ? `<input type="checkbox" class="bulk-check" data-bulk-id="${s.id}" ${bulkSel.has(s.id) ? 'checked' : ''}>` : ''}
         <button class="btn small ghost fav-btn${isFav(s) ? ' on' : ''}" data-act="fav" data-id="${s.id}" title="收藏 / 取消收藏">${isFav(s) ? '★ 已收藏' : '☆ 收藏'}</button>
-        ${s.checkinFrequency === 'daily' && s.category !== 'idle'
+        ${s.checkinFrequency === 'daily' && s.category !== 'idle' && s.category !== 'archived'
           ? (checkedToday
             ? `<button class="btn small ok" data-act="uncheckin" data-id="${s.id}">↩ 撤回</button>`
             : (dueToday(s, todayStr())
@@ -614,7 +717,7 @@ function cardHTML(s, idx) {
     <span class="ghost-num">${num}</span>
     <div class="c-head">
       <span class="cat-pill ${cat.cls}"><i></i>${cat.icon} ${cat.label}</span>
-      <span class="c-badges">${isFav(s) ? '<span class="badge b-fav">★ 收藏</span>' : ''}${s.abnormal ? '<span class="badge b-bad">⚠️ 异常</span>' : ''}${s.visits ? `<span class="badge b-visit" title="累计访问 ${s.visits} 次">👆 ${s.visits}</span>` : ''}${exp}${healthBadge}${s.linkStatus === 'dead' ? '<span class="badge b-bad" title="最近一次检测打不开">⚠️ 疑似失效</span>' : ''}${st ? `<span class="badge b-fire">🔥 连${st}天</span>` : ''}${checkedToday ? '<span class="badge b-ok">今日已签</span>' : ''}${partialBadge}</span>
+      <span class="c-badges">${isFav(s) ? '<span class="badge b-fav">★ 收藏</span>' : ''}${s.abnormal ? '<span class="badge b-bad">⚠️ 异常</span>' : ''}${s.visits ? `<span class="badge b-visit" title="累计访问 ${s.visits} 次">👆 ${s.visits}</span>` : ''}${exp}${healthBadge}${certBadge}${secBadge}${s.linkStatus === 'dead' ? '<span class="badge b-bad" title="最近一次检测打不开">⚠️ 疑似失效</span>' : ''}${st ? `<span class="badge b-fire">🔥 连${st}天</span>` : ''}${checkedToday ? '<span class="badge b-ok">今日已签</span>' : ''}${partialBadge}</span>
     </div>
     <div class="c-title">${favIcon(s)}${s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener" data-visit="${s.id}">${esc(s.name)} <span class="arrow">↗</span></a>` : esc(s.name)}</div>
     <div class="c-desc">${esc(bold)}</div>
@@ -806,8 +909,9 @@ const expandedRenewHistory = new Set();
 function renderExpiring() {
   const box = $('#expiring-list');
   if (!box) return;
+  /* v65：已归档的服务不进临期提醒 */
   const items = services
-    .filter((s) => s.expiresAt)
+    .filter((s) => s.expiresAt && s.category !== 'archived')
     .map((s) => ({ s, d: daysUntil(s.expiresAt) }))
     .filter((x) => x.d <= 30)
     .sort((a, b) => a.d - b.d);
@@ -824,7 +928,10 @@ function renderExpiring() {
           : (d <= 7 ? `<span class="exp-badge soon">${d} 天后到期</span>`
           : `<span class="exp-badge later">${d} 天后到期</span>`));
         const hist = (s.renewHistory || []).slice().reverse().map((h) => `<div>${esc(h.at)}：${esc(h.from || '—')} → ${esc(h.to)}</div>`).join('');
-        return `<div class="exp-item"><div class="landing-checkin-item"><span class="ck">⏰</span><span class="ck-name">${s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.name)}</a>` : esc(s.name)}</span><span class="ck-note">${esc(CATS[s.category]?.label || s.category)} · 到期 ${esc(s.expiresAt)}${host ? ` · ${esc(host)}` : ''}</span>${badge}<button class="btn small ghost" data-act="renew" data-id="${s.id}">${renewLabel(s)}</button><button class="btn small ghost" data-act="edit" data-id="${s.id}">编辑</button>${(s.prevRenew || s.prevExpiresAt) ? `<button class="btn small ghost" data-act="undo-renew" data-id="${s.id}">↩ 撤回续期</button>` : ''}${(s.renewHistory || []).length ? `<button class="btn small ghost" data-act="toggle-renew-hist" data-id="${s.id}">📜 记录 (${s.renewHistory.length})</button>` : ''}</div>${expandedRenewHistory.has(s.id) && hist ? `<div class="renew-hist">${hist}</div>` : ''}</div>`;
+        /* v65：证书到期（<30 天标红；只在已查到证书时显示） */
+        const cd = certDays(s);
+        const certNote = cd === null ? '' : (cd < 0 ? `<span class="exp-badge overdue">证书已过期 ${-cd} 天</span>` : (cd < 30 ? `<span class="exp-badge soon">证书 ${cd} 天后到期</span>` : `<span class="exp-badge later">证书 ${cd} 天后到期</span>`));
+        return `<div class="exp-item"><div class="landing-checkin-item"><span class="ck">⏰</span><span class="ck-name">${s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.name)}</a>` : esc(s.name)}</span><span class="ck-note">${esc(CATS[s.category]?.label || s.category)} · 到期 ${esc(s.expiresAt)}${host ? ` · ${esc(host)}` : ''}</span>${badge}${certNote}<button class="btn small ghost" data-act="renew" data-id="${s.id}">${renewLabel(s)}</button><button class="btn small ghost" data-act="edit" data-id="${s.id}">编辑</button>${(s.prevRenew || s.prevExpiresAt) ? `<button class="btn small ghost" data-act="undo-renew" data-id="${s.id}">↩ 撤回续期</button>` : ''}${(s.renewHistory || []).length ? `<button class="btn small ghost" data-act="toggle-renew-hist" data-id="${s.id}">📜 记录 (${s.renewHistory.length})</button>` : ''}</div>${expandedRenewHistory.has(s.id) && hist ? `<div class="renew-hist">${hist}</div>` : ''}</div>`;
       }).join('')
     : '<div class="empty">太好了，30 天内没有要到期的服务。</div>';
   renderCalendar();
@@ -984,6 +1091,11 @@ function renderAccManager() {
   const p = serviceProgress(svc, t);
   const prog = (canCheckin && p.total > 1) ? `<span class="muted">已签 ${p.done}/${p.total} · ${Math.round(p.done / p.total * 100)}%</span>` : '';
   const head = `<div class="acc-panel-head"><b>👤 账号（${list.length}）</b>${prog}${svc.url ? `<a href="${esc(svc.url)}" target="_blank" rel="noopener">直达网站 ↗</a>` : ''}</div>`;
+  /* v65：从共享账号库选一个账号链进来（库里改密码，这里跟着变） */
+  const vaultPick = vault.length
+    ? `<div class="vault-pick-row"><select id="am-vault-pick">${vault.map((v) => `<option value="${esc(v.id)}">${esc(v.label)}${v.username ? `（${esc(v.username)}）` : ''}</option>`).join('')}</select><button class="btn small primary" id="am-vault-add" type="button">从账号库选择</button></div>`
+    : `<p class="muted" style="margin:0 0 8px">共享账号库还是空的：先去“🔐 账号库”面板存几个常用账号，就能多服务共用一份。</p>`;
+  const all = allAccounts();
   const rows = list.map((a) => {
     const signed = accCheckins(a).includes(t);
     const signBtn = canCheckin
@@ -991,14 +1103,47 @@ function renderAccManager() {
         ? `<span class="signed-tag">✓ 今日已签</span><button class="btn small ghost" data-act="uncheckin-acc" data-id="${svc.id}" data-acc="${esc(a.id)}">↩ 撤回</button>`
         : `<button class="btn small primary" data-act="checkin-acc" data-id="${svc.id}" data-acc="${esc(a.id)}">签到</button>`)
       : '';
+    /* v65：链接到库的账号标“🔗 库”，安全分和弱点直接显示；本地账号可以一键存入账号库 */
+    const score = accountSecurityScore(a, all);
+    const reasons = securityReasons(a, all);
+    const secLine = `<span class="badge ${securityClass(score)}" title="${esc(reasons.join('、'))}">🔐 ${score} 分</span>`;
+    const linkTag = a.sharedId ? '<span class="acc-default-tag">🔗 库</span>' : '';
+    const saveBtn = a.sharedId ? '' : `<button class="btn small ghost" data-act="vault-save" data-id="${svc.id}" data-acc="${esc(a.id)}" title="把这个账号存进共享账号库，多个服务共用一份">存入账号库</button>`;
     return `<div class="acc-item">
-      <div class="acc-item-top"><b>${esc(a.label)}</b>${a.isDefault ? '<span class="acc-default-tag">★ 默认</span>' : `<button class="btn small ghost" data-act="set-default-acc" data-id="${svc.id}" data-acc="${esc(a.id)}">设为默认</button>`}<span style="margin-left:auto;display:flex;gap:6px;align-items:center">${signBtn}<button class="btn small ghost" data-act="acc-edit" data-id="${svc.id}" data-acc="${esc(a.id)}">编辑</button><button class="btn small ghost" data-act="acc-del" data-id="${svc.id}" data-acc="${esc(a.id)}">删除</button></span></div>
+      <div class="acc-item-top"><b>${esc(a.label)}</b>${a.isDefault ? '<span class="acc-default-tag">★ 默认</span>' : `<button class="btn small ghost" data-act="set-default-acc" data-id="${svc.id}" data-acc="${esc(a.id)}">设为默认</button>`}${linkTag}${secLine}<span style="margin-left:auto;display:flex;gap:6px;align-items:center">${signBtn}<button class="btn small ghost" data-act="acc-edit" data-id="${svc.id}" data-acc="${esc(a.id)}">编辑</button>${saveBtn}<button class="btn small ghost" data-act="acc-del" data-id="${svc.id}" data-acc="${esc(a.id)}">删除</button></span></div>
       <div class="acc-line"><span class="acc-k">账号</span><span class="acc-v">${esc(a.username) || '<i class="muted">（空）</i>'}</span><button class="btn small ghost" data-act="copy-acc-user" data-id="${svc.id}" data-acc="${esc(a.id)}">复制</button></div>
       <div class="acc-line"><span class="acc-k">密码</span><span class="acc-v acc-pw">••••••</span><button class="btn small ghost" data-act="toggle-pw" data-id="${svc.id}" data-acc="${esc(a.id)}">👁</button><button class="btn small ghost" data-act="copy-acc-pw" data-id="${svc.id}" data-acc="${esc(a.id)}">复制</button></div>
+      ${a.passwordChangedAt ? `<div class="acc-note">上次改密 ${esc(a.passwordChangedAt)}</div>` : '<div class="acc-note muted">改密时间未知（改一次密码就记上了）</div>'}
       ${a.notes ? `<div class="acc-note">${esc(a.notes)}</div>` : ''}
     </div>`;
   }).join('');
-  box.innerHTML = head + (rows || '<div class="empty">还没录账号，点下面的“➕ 添加账号”。</div>');
+  box.innerHTML = head + vaultPick + (rows || '<div class="empty">还没录账号，点下面的“➕ 添加账号”。</div>');
+  /* 从账号库选择：把选中的库账号链到这个服务上（不复制密码，读时以库为准） */
+  $('#am-vault-add')?.addEventListener('click', async () => {
+    const sel = $('#am-vault-pick');
+    const vid = sel?.value;
+    const v = vault.find((x) => x.id === vid);
+    if (!v) return;
+    const cur = accountList(svc);
+    if (cur.some((a) => a.sharedId === vid)) return toast('这个库账号已经链进来了', 'bad');
+    const one = {
+      id: '',
+      sharedId: v.id,
+      label: v.label,
+      username: v.username,
+      password: v.password,
+      notes: v.notes || '',
+      passwordChangedAt: v.passwordChangedAt,
+      isDefault: !cur.length,
+      checkins: []
+    };
+    const next = [...cur, one];
+    if (next.length && !next.some((a) => a.isDefault)) next[0].isDefault = true;
+    try {
+      await saveAccAccounts(next);
+      toast('已从账号库链入');
+    } catch (err) { handleAuthErr(err); }
+  });
 }
 /* 弹窗关着就什么都不做；开着就按最新的 services 重画（签到/设默认后刷新用） */
 function refreshAccManager() {
@@ -1137,6 +1282,8 @@ function openModal(svc) {
   $('#autosignin-test-msg').textContent = '';
   const last = svc?.autoSigninLast;
   $('#autosignin-last').textContent = last ? `上次自动签到：${last.at || ''} ${last.ok ? '✅ 成功' : `❌ 失败（${last.note || 'HTTP ' + (last.status || '')}）`}` : '';
+  /* v65：打开弹窗时按已填的网址/名称给一次分类推荐 */
+  updateCatSuggest();
   $('#overlay').classList.remove('hidden');
   $('#f-name').focus();
 }
@@ -1182,6 +1329,50 @@ $('#btn-add-custom-field')?.addEventListener('click', () => {
 $('#f-registered').addEventListener('change', autoFillExpires);
 $('#f-renew-days').addEventListener('change', autoFillExpires);
 $('#f-expires').addEventListener('input', () => { expiryDirty = true; });
+
+/* v65：智能分类推荐——按网址/名称给分类和标签出建议，点一下填上 */
+let catSuggestion = null; // {category, tags}
+const SUGGEST_ICONS = { '开发': '🛠️', 'VPS/服务器': '🖥️', '邮箱': '📧', '视频': '🎬', '支付': '💰', 'AI': '🤖', '游戏': '🎮', '购物': '🛒', '其他': '📦' };
+function updateCatSuggest() {
+  const box = $('#cat-suggest');
+  if (!box) return;
+  catSuggestion = suggestCategory($('#f-url').value, $('#f-name').value);
+  if (!catSuggestion || (!$('#f-url').value.trim() && !$('#f-name').value.trim())) {
+    box.classList.add('hidden');
+    catSuggestion = null;
+    return;
+  }
+  const cur = CATS[$('#f-category').value];
+  if (cur && cur.label === catSuggestion.category) { box.classList.add('hidden'); return; }
+  $('#cat-suggest-text').textContent = `推荐：${catSuggestion.category}${catSuggestion.tags.length ? ` · 标签 ${catSuggestion.tags.join('、')}` : ''}`;
+  box.classList.remove('hidden');
+}
+$('#f-url').addEventListener('input', updateCatSuggest);
+$('#f-name').addEventListener('input', updateCatSuggest);
+$('#btn-cat-apply')?.addEventListener('click', async () => {
+  if (!catSuggestion) return;
+  const b = $('#btn-cat-apply');
+  if (b.disabled) return;
+  b.disabled = true;
+  try {
+    /* 推荐的分类名如果已存在就直接选；没有就新建一个分类再选 */
+    let catId = Object.entries(CATS).find(([, c]) => c.label === catSuggestion.category)?.[0];
+    if (!catId) {
+      const r = await api('/api/categories', { method: 'POST', body: JSON.stringify({ label: catSuggestion.category, icon: SUGGEST_ICONS[catSuggestion.category] || '📦' }) });
+      catId = r && r.id;
+      await loadAll();
+      renderCatOptions();
+    }
+    if (catId) $('#f-category').value = catId;
+    /* 标签：原来有的保留，推荐的没打上的补上 */
+    const cur = $('#f-tags').value.split(/[,，、\s]+/).map((t) => t.trim()).filter(Boolean);
+    for (const t of catSuggestion.tags) if (!cur.includes(t)) cur.push(t);
+    $('#f-tags').value = cur.join('，');
+    $('#cat-suggest').classList.add('hidden');
+    toast('已按推荐填好分类和标签');
+  } catch (err) { handleAuthErr(err); }
+  finally { b.disabled = false; }
+});
 
 /* v60：自动签到——测试这个请求（只发请求不记签到，返回状态和结果） */
 $('#btn-autosignin-test').addEventListener('click', async () => {
@@ -1270,6 +1461,28 @@ document.body.addEventListener('click', async (e) => {
       return;
     }
     if (act === 'acc-del') { deleteAccAccount(btn.dataset.acc); return; }
+    /* v65：账号库——编辑/删除库账号（面板里），把本地账号存进库（弹窗里） */
+    if (act === 'vault-edit') {
+      const v = vault.find((x) => x.id === id);
+      if (!v) return;
+      showVaultForm(v);
+      return;
+    }
+    if (act === 'vault-del') { deleteVaultAccount(id); return; }
+    if (act === 'vault-save') {
+      const { svc, acc } = findAcc();
+      if (!svc || !acc) return;
+      if (acc.sharedId) return;
+      try {
+        const r = await api('/api/vault', { method: 'POST', body: JSON.stringify({ action: 'create', account: { label: acc.label, username: acc.username, password: acc.password, notes: acc.notes || '' } }) });
+        const vid = r.account && r.account.id;
+        if (!vid) return toast('存入失败', 'bad');
+        const next = accountList(svc).map((a) => (a.id === acc.id ? { ...a, sharedId: vid } : a));
+        await saveAccAccounts(next); // 里面会 loadAll（重拉账号库并重画）
+        toast('已存入账号库，这个账号以后改一次密码处处都变');
+      } catch (err) { handleAuthErr(err); }
+      return;
+    }
     const findAcc = () => {
       const svc = services.find((x) => x.id === id);
       const acc = svc ? accountList(svc).find((a) => a.id === btn.dataset.acc) : null;
@@ -2017,6 +2230,179 @@ function renderPwReuse() {
   `).join('');
 }
 
+/* v65：共享账号库——一个账号只存一份，多服务共用；改库里的密码，所有链接的
+   服务跟着变；删库里的账号，链接它的服务自动变回本地副本。 */
+let vaultEditId = null; // 正在编辑哪条库账号（null = 正在添加）
+async function loadVault() {
+  try { const v = await api('/api/vault'); vault = Array.isArray(v.accounts) ? v.accounts : []; } catch { vault = []; }
+  renderVault();
+}
+function renderVault() {
+  const box = $('#vault-list');
+  if (!box) return;
+  $('#vault-count').textContent = vault.length ? `共 ${vault.length} 个账号` : '';
+  if (!vault.length) {
+    box.innerHTML = '<p class="muted">库还是空的：点“➕ 添加账号”把常用的账号存进来，多个服务就能共用一份，改一次密码处处都变。</p>';
+    return;
+  }
+  const all = allAccounts();
+  const linked = {};
+  for (const s of services) for (const a of accountList(s)) {
+    if (a.sharedId) (linked[a.sharedId] = linked[a.sharedId] || []).push(s.name);
+  }
+  box.innerHTML = vault.map((v) => {
+    const score = accountSecurityScore(v, all);
+    const use = linked[v.id] || [];
+    return `<div class="landing-checkin-item"><span class="ck">🔐</span><span class="ck-name">${esc(v.label)}</span><span class="ck-note">${esc(v.username || '')}${v.passwordChangedAt ? ` · 上次改密 ${esc(v.passwordChangedAt)}` : ' · 改密时间未知'}${use.length ? ` · ${use.length} 个服务在用` : ' · 还没服务用它'}</span><span class="badge ${securityClass(score)}" title="${esc(securityReasons(v, all).join('、'))}">🔐 ${score} 分</span><button class="btn small ghost" data-act="vault-edit" data-id="${esc(v.id)}">编辑</button><button class="btn small ghost" data-act="vault-del" data-id="${esc(v.id)}">删除</button></div>`;
+  }).join('');
+}
+/* v65：账号库表单——添加/编辑一条库账号（密码变了服务端记今天为改密日期） */
+function showVaultForm(v) {
+  vaultEditId = v ? v.id : null;
+  $('#v-label').value = v?.label || '';
+  $('#v-username').value = v?.username || '';
+  $('#v-password').value = v?.password || '';
+  $('#v-notes').value = v?.notes || '';
+  $('#vault-form-save').textContent = v ? '保存修改' : '存入账号库';
+  $('#vault-form').classList.remove('hidden');
+  $('#v-username').focus();
+}
+function hideVaultForm() {
+  $('#vault-form')?.classList.add('hidden');
+  vaultEditId = null;
+}
+async function saveVaultForm() {
+  const username = $('#v-username').value.trim();
+  const password = $('#v-password').value;
+  if (!username && !password) return toast('账号和密码至少填一个', 'bad');
+  const account = {
+    label: $('#v-label').value.trim().slice(0, 30) || '账号',
+    username: username.slice(0, 200),
+    password: password.slice(0, 500),
+    notes: $('#v-notes').value.trim().slice(0, 200)
+  };
+  const b = $('#vault-form-save');
+  if (b.disabled) return;
+  b.disabled = true;
+  try {
+    if (vaultEditId) {
+      await api('/api/vault', { method: 'POST', body: JSON.stringify({ action: 'update', id: vaultEditId, account }) });
+    } else {
+      await api('/api/vault', { method: 'POST', body: JSON.stringify({ action: 'create', account }) });
+    }
+    await loadAll(); // loadAll 里会重新拉账号库并重画全部面板
+    hideVaultForm();
+    toast(vaultEditId ? '已保存' : '已存入账号库');
+  } catch (err) { handleAuthErr(err); }
+  finally { b.disabled = false; }
+}
+async function deleteVaultAccount(id) {
+  const v = vault.find((x) => x.id === id);
+  if (!v) return;
+  if (!confirm(`确定删除库账号「${v.label}」？链接它的服务会自动变回本地副本（账号密码保留在服务里）。`)) return;
+  try {
+    await api('/api/vault', { method: 'POST', body: JSON.stringify({ action: 'delete', id }) });
+    await loadAll(); // loadAll 里会重新拉账号库并重画全部面板
+    toast('已删除，链接的服务已变回本地副本');
+  } catch (err) { handleAuthErr(err); }
+}
+$('#btn-vault-add')?.addEventListener('click', () => showVaultForm(null));
+$('#vault-form-cancel')?.addEventListener('click', hideVaultForm);
+$('#vault-form-save')?.addEventListener('click', saveVaultForm);
+/* v65：账号库表单里也可以生成强密码（复用账号管理弹窗的生成器） */
+$('#v-gen-pw')?.addEventListener('click', () => {
+  $('#v-password').value = generatePassword($('#v-pw-len').value);
+  toast('已生成强密码，记得保存');
+});
+
+/* v65：最不安全的 5 个账号——全站账号按安全分从低到高排，分数低的先处理 */
+function renderSecScore() {
+  const box = $('#secscore-list');
+  if (!box) return;
+  const all = allAccounts();
+  const rows = [];
+  for (const s of services) {
+    for (const a of accountList(s)) {
+      rows.push({ serviceId: s.id, service: s.name, acc: a, score: accountSecurityScore(a, all), reasons: securityReasons(a, all) });
+    }
+  }
+  rows.sort((x, y) => x.score - y.score);
+  const worst = rows.slice(0, 5);
+  if (!worst.length) { box.innerHTML = '<p class="muted">还没录任何账号，先去服务卡片上点“👤 账号”录几个吧。</p>'; return; }
+  box.innerHTML = worst.map((r) => `<div class="landing-checkin-item"><span class="ck">🔐</span><span class="ck-name">${esc(r.service)}</span><span class="ck-note">${esc(r.acc.label)}${r.acc.username ? ' · ' + esc(r.acc.username) : ''} · ${esc(r.reasons.join('、'))}</span><span class="badge ${securityClass(r.score)}">${r.score} 分</span><button class="btn small ghost" data-act="acc-manager" data-id="${r.serviceId}">去改</button></div>`).join('');
+}
+
+/* v65：该换密码了——上次改密超过 90 天的账号（没记改密时间的老账号不算，显示“未知”） */
+function renderRotate() {
+  const box = $('#rotate-list');
+  if (!box) return;
+  const t = todayStr();
+  const rows = [];
+  for (const s of services) {
+    for (const a of accountList(s)) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(String(a.passwordChangedAt || ''))) continue;
+      const d = dayDiff(a.passwordChangedAt, t);
+      if (d > 90) rows.push({ serviceId: s.id, service: s.name, acc: a, days: d });
+    }
+  }
+  rows.sort((x, y) => y.days - x.days);
+  $('#rotate-count').textContent = rows.length ? `共 ${rows.length} 个账号` : '';
+  if (!rows.length) { box.innerHTML = '<p class="muted">没有超过 90 天没换的密码 ✓（没记改密时间的老账号不算在内，改一次密码就记上了）。</p>'; return; }
+  box.innerHTML = rows.map((r) => `<div class="landing-checkin-item"><span class="ck">🔑</span><span class="ck-name">${esc(r.service)}</span><span class="ck-note">${esc(r.acc.label)}${r.acc.username ? ' · ' + esc(r.acc.username) : ''} · 上次改密 ${esc(r.acc.passwordChangedAt)}（${r.days} 天前）</span><button class="btn small ghost" data-act="acc-manager" data-id="${r.serviceId}">去改</button></div>`).join('');
+}
+
+/* v65：月度报告——最近 6 个月（服务端每月 1 号自动生成上月报告并推送） */
+function renderMonthly() {
+  const box = $('#monthly-list');
+  if (!box) return;
+  const list = (meta?.monthlyReports || []).slice().reverse();
+  if (!list.length) {
+    box.innerHTML = '<p class="muted">还没有月度报告：每月 1 号会自动生成上月的报告并推送到 Telegram；也可以点下面“生成上月报告”手动来一份。</p>';
+    return;
+  }
+  box.innerHTML = list.map((r) => {
+    const low = (r.lowestUptime || []).length
+      ? (r.lowestUptime || []).map((x) => `${esc(x.name)} ${x.rate}%`).join('、')
+      : '无数据';
+    return `<div class="panel-head" style="margin-top:14px"><h3 style="font-size:15px">📊 ${esc(r.month)}</h3><span class="muted">生成于 ${esc(r.generatedAt || '')}</span></div>
+    <div class="year-grid">
+      <div class="year-stat"><b>${r.days}</b><span>签到天数</span></div>
+      <div class="year-stat"><b>${r.totalCk}</b><span>总签到次数</span></div>
+      <div class="year-stat"><b>${r.xp}⚡</b><span>签到攒的经验</span></div>
+      <div class="year-stat"><b>${r.topService ? esc(r.topService) : '—'}</b><span>最常签到${r.topService ? `（${r.topCount} 次）` : ''}</span></div>
+      <div class="year-stat"><b>${r.newServices}</b><span>新增服务</span></div>
+      <div class="year-stat"><b>${r.expiring}</b><span>当月到期</span></div>
+    </div>
+    <p class="muted" style="margin:6px 0 0">📉 本月在线率最低：${low}</p>`;
+  }).join('');
+}
+
+/* v65：本月可用性——按 linkHistory 当月记录算在线率，从低到高排；没记录的显示“无数据” */
+function renderAvail() {
+  const box = $('#avail-list');
+  if (!box) return;
+  const t = todayStr().slice(0, 7);
+  const rows = services.map((s) => ({ s, u: monthlyUptime(s, t) }));
+  const withData = rows.filter((x) => x.u).sort((a, b) => a.u.rate - b.u.rate || b.u.count - a.u.count);
+  const noData = rows.filter((x) => !x.u);
+  $('#avail-title').textContent = `📊 本月可用性（${t}）`;
+  if (!withData.length && !noData.length) { box.innerHTML = '<p class="muted">还没收录服务。</p>'; return; }
+  box.innerHTML = withData.map(({ s, u }) => `<div class="landing-checkin-item"><span class="ck">${u.rate >= 99 ? '🟢' : (u.rate >= 90 ? '🟡' : '🔴')}</span><span class="ck-name">${esc(s.name)}</span><span class="ck-note">本月探测 ${u.count} 次</span><span class="badge ${u.rate >= 99 ? 'b-ok' : (u.rate >= 90 ? 'b-warn' : 'b-bad')}">${u.rate}%</span></div>`).join('')
+    + (noData.length ? `<p class="muted" style="margin-top:8px">无数据（本月还没探测记录）：${noData.map((x) => esc(x.s.name)).join('、')}</p>` : '');
+}
+
+/* v65：最近登录——最近 10 条（时间、IP、设备）；IP 变了服务端会推异地提醒 */
+async function loadLogins() {
+  const box = $('#logins-list');
+  if (!box) return;
+  try {
+    const r = await api('/api/login-history');
+    const list = r.logins || [];
+    if (!list.length) { box.innerHTML = '<p class="muted">还没有登录记录（从这次登录开始记）。</p>'; return; }
+    box.innerHTML = list.map((l) => `<div class="landing-checkin-item"><span class="ck">🕐</span><span class="ck-name">${esc(l.at || '')}</span><span class="ck-note">${esc(l.ip || '')} · ${esc(l.device || '')}</span></div>`).join('');
+  } catch { box.innerHTML = '<p class="muted">加载失败，刷新再试。</p>'; }
+}
+
 /* 年度总结：今年的签到天数、总次数、签到攒的经验（每天首次 +5、全勤 +10，都记在 history 里）、
    最常签到的服务、收录数、收藏数 */
 function renderYearReview() {
@@ -2048,6 +2434,98 @@ function renderYearReview() {
       <div class="year-stat"><b>${favs}</b><span>收藏</span></div>
     </div>`;
 }
+/* v65：签到分享卡片——用 canvas 在浏览器里画一张成绩卡（本月签到天数、总连签
+   天数、XP、等级、最常签到的服务、HubMate 字样），生成 PNG 下载。纯前端，不走服务端。 */
+function drawShareCard() {
+  const t = todayStr();
+  const ym = t.slice(0, 7);
+  const hist = meta?.history || {};
+  let days = 0;
+  for (const [d, h] of Object.entries(hist)) {
+    if (d.startsWith(ym + '-') && (h.c || 0) > 0) days++;
+  }
+  const best = Math.max(0, ...services.map((s) => maxRun(s.checkins || [])));
+  const lv = meta?.level || { lv: 1, title: '初出茅庐', xp: meta?.xp || 0 };
+  let top = null, topN = 0;
+  for (const s of services) {
+    const n = (s.checkins || []).filter((d) => d.startsWith(ym + '-')).length;
+    if (n > topN) { topN = n; top = s; }
+  }
+  const W = 800, H = 500;
+  const cv = document.createElement('canvas');
+  cv.width = W; cv.height = H;
+  const ctx = cv.getContext('2d');
+  const g = ctx.createLinearGradient(0, 0, W, H);
+  g.addColorStop(0, '#1a0b2e'); g.addColorStop(0.5, '#2d1b4e'); g.addColorStop(1, '#0e2a3a');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = 'rgba(255,255,255,0.08)'; ctx.lineWidth = 1;
+  for (let x = 0; x < W; x += 40) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+  for (let y = 0; y < H; y += 40) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+  ctx.fillStyle = '#f0abfc'; ctx.font = '700 34px sans-serif'; ctx.textAlign = 'left';
+  ctx.fillText('🗂️ HubMate · 我的签到成绩', 48, 76);
+  ctx.fillStyle = 'rgba(240,240,255,0.75)'; ctx.font = '22px sans-serif';
+  ctx.fillText(`${ym} · ${t}`, 48, 112);
+  const stats = [
+    [`${days}`, '本月签到天数'],
+    [`${best}`, '最长连签（天）'],
+    [`${lv.xp}⚡`, '热情值'],
+    [`Lv.${lv.lv}`, lv.title]
+  ];
+  const cw = (W - 96) / 4;
+  stats.forEach(([num, label], i) => {
+    const x = 48 + i * cw;
+    ctx.fillStyle = 'rgba(255,255,255,0.07)';
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(x, 150, cw - 16, 150, 18); else ctx.rect(x, 150, cw - 16, 150);
+    ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.font = '700 44px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText(num, x + (cw - 16) / 2, 225);
+    ctx.fillStyle = 'rgba(240,240,255,0.7)'; ctx.font = '20px sans-serif';
+    ctx.fillText(label, x + (cw - 16) / 2, 268);
+  });
+  ctx.fillStyle = '#e9d5ff'; ctx.font = '700 30px sans-serif'; ctx.textAlign = 'left';
+  ctx.fillText(`🏆 本月最常签到：${top ? `${top.name}（${topN} 次）` : '—'}`, 48, 370);
+  ctx.fillStyle = 'rgba(240,240,255,0.6)'; ctx.font = '20px sans-serif';
+  ctx.fillText('每天签到不遗漏，想学想看的网站，随时回来接着浏览。', 48, 420);
+  ctx.fillStyle = 'rgba(240,240,255,0.45)'; ctx.font = '18px sans-serif';
+  ctx.fillText('HubMate · 我的服务台', 48, 460);
+  cv.toBlob((blob) => {
+    if (!blob) { toast('生成失败，换个浏览器再试', 'bad'); return; }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `hubmate-签到-${t}.png`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    toast('分享卡已下载');
+  }, 'image/png');
+}
+$('#btn-share-card')?.addEventListener('click', drawShareCard);
+$('#btn-monthly-gen')?.addEventListener('click', async () => {
+  const b = $('#btn-monthly-gen');
+  if (b.disabled) return;
+  b.disabled = true;
+  try {
+    const r = await api('/api/monthly-report/run', { method: 'POST' });
+    if (r.skipped) toast(`上月（${r.month}）报告已经有了`, 'bad');
+    else {
+      await loadAll();
+      toast(`已生成 ${r.month} 月度报告`);
+    }
+  } catch (err) { handleAuthErr(err); }
+  finally { b.disabled = false; }
+});
+$('#btn-archive-run')?.addEventListener('click', async () => {
+  const b = $('#btn-archive-run');
+  if (b.disabled) return;
+  b.disabled = true;
+  try {
+    const r = await api('/api/archive/run', { method: 'POST' });
+    await loadAll();
+    toast(r.archived ? `已归档 ${r.archived} 个：${(r.names || []).join('、')}` : '没有需要归档的服务');
+  } catch (err) { handleAuthErr(err); }
+  finally { b.disabled = false; }
+});
+
 $('#dupes-list').addEventListener('click', async (e) => {
   const btn = e.target.closest('[data-dup-del]');
   if (!btn) return;
@@ -2611,8 +3089,13 @@ document.addEventListener('click', (e) => {
 });
 
 /* ---------- v48 台账分类分组折叠（状态存浏览器） ---------- */
+/* v65：已归档分类默认折叠（第一次打开时就收起来，免得一堆过期服务占地方） */
 function loadCollapsedCats() {
-  try { return new Set(JSON.parse(localStorage.getItem('hub-collapsed-cats') || '[]')); } catch { return new Set(); }
+  try {
+    const raw = localStorage.getItem('hub-collapsed-cats');
+    if (raw === null) return new Set(['archived']);
+    return new Set(JSON.parse(raw || '[]'));
+  } catch { return new Set(['archived']); }
 }
 function saveCollapsedCats(set) {
   try { localStorage.setItem('hub-collapsed-cats', JSON.stringify([...set])); } catch {}

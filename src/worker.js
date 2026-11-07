@@ -48,6 +48,9 @@ const DEFAULT_CATEGORIES = [
   { id: 'idle', label: '已闲置', icon: '🧟', cls: 't-idle' }
 ];
 const BUILTIN_CATS = new Set(DEFAULT_CATEGORIES.map((c) => c.id));
+/* v65：已归档分类（自动归档时按需新建，图标 🗄️） */
+const ARCHIVED_CAT = { id: 'archived', label: '已归档', icon: '🗄️', cls: 't-custom' };
+function isArchived(s) { return s && s.category === ARCHIVED_CAT.id; }
 function categoriesOf(data) {
   if (Array.isArray(data.categories) && data.categories.length) return data.categories;
   return DEFAULT_CATEGORIES;
@@ -281,7 +284,8 @@ function maxRun(dates) {
   return best;
 }
 function dailyServices(data) {
-  return data.services.filter((s) => s.checkinFrequency === 'daily' && s.category !== 'idle');
+  /* v65：已归档的服务不计入签到队列（和 idle 一样排除） */
+  return data.services.filter((s) => s.checkinFrequency === 'daily' && s.category !== 'idle' && !isArchived(s));
 }
 function ensureMeta(data) {
   let dirty = false;
@@ -347,7 +351,9 @@ function metaPayload(data) {
       doneToday: daily.filter((s) => (s.checkins || []).includes(t)).length
     },
     achievements: ACH_DEFS.map((a) => ({ ...a, unlockedAt: data.achievements[a.id] || null })),
-    history: data.history
+    history: data.history,
+    /* v65：月度报告（最近 6 个月，给数据中心面板用） */
+    monthlyReports: (Array.isArray(data.monthlyReports) ? data.monthlyReports : []).slice(-6)
   };
 }
 function publicServices(data) {
@@ -414,10 +420,19 @@ async function loadData(db) {
     categories: safeJSON(meta.categories, null),
     notify: safeJSON(meta.notify, {}),
     githubBackup: safeJSON(meta.githubBackup, {}),
+    /* v65：共享账号库、月度报告、归档记录、登录历史（都是 meta 表里的 JSON） */
+    sharedAccounts: safeJSON(meta.sharedAccounts, []),
+    monthlyReports: safeJSON(meta.monthlyReports, []),
+    archivedLog: safeJSON(meta.archivedLog, []),
+    loginHistory: safeJSON(meta.loginHistory, []),
     services,
     notes
   };
   let dirty = ensureMeta(data);
+  /* v65：读时把共享账号库解析进服务账号（库为准），解析结果有变就写回快照 */
+  const vaultSnap = JSON.stringify(data.services.map((s) => s.accounts || []));
+  resolveVaultAccounts(data);
+  if (JSON.stringify(data.services.map((s) => s.accounts || [])) !== vaultSnap) dirty = true;
   data.services.forEach((s, i) => {
     if (typeof s.sortOrder !== 'number') { s.sortOrder = i; dirty = true; }
     if (typeof s.visits !== 'number') { s.visits = 0; dirty = true; }
@@ -503,7 +518,12 @@ async function saveData(db, data) {
     ['categories', JSON.stringify(Array.isArray(data.categories) ? data.categories : [])],
     ['notify', JSON.stringify(data.notify || {})],
     ['githubBackup', JSON.stringify(data.githubBackup || {})],
-    ['totpEnabled', JSON.stringify(!!data.totpEnabled)]
+    ['totpEnabled', JSON.stringify(!!data.totpEnabled)],
+    /* v65 */
+    ['sharedAccounts', JSON.stringify(Array.isArray(data.sharedAccounts) ? data.sharedAccounts : [])],
+    ['monthlyReports', JSON.stringify(Array.isArray(data.monthlyReports) ? data.monthlyReports.slice(-12) : [])],
+    ['archivedLog', JSON.stringify(Array.isArray(data.archivedLog) ? data.archivedLog.slice(-50) : [])],
+    ['loginHistory', JSON.stringify(Array.isArray(data.loginHistory) ? data.loginHistory.slice(-50) : [])]
   ];
   if (data.apiToken) metaEntries.push(['apiToken', data.apiToken]);
   if (data.totpSecret) metaEntries.push(['totpSecret', data.totpSecret]);
@@ -573,8 +593,48 @@ function sanitizeAccount(a) {
     password: String(a.password || '').slice(0, 500),
     notes: String(a.notes || '').trim().slice(0, 200),
     isDefault: !!a.isDefault,
+    /* v65：链接到共享账号库的账号（sharedId 指向 vault 里的 id）；passwordChangedAt
+       是上次改密码的日期（YYYY-MM-DD），老账号没有这个字段按“未知”处理 */
+    sharedId: (typeof a.sharedId === 'string' && a.sharedId.trim()) ? String(a.sharedId).trim().slice(0, 32) : undefined,
+    passwordChangedAt: (/^\d{4}-\d{2}-\d{2}$/.test(String(a.passwordChangedAt || ''))) ? String(a.passwordChangedAt) : undefined,
     checkins: (Array.isArray(a.checkins) ? a.checkins : []).filter((d) => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d)).slice(0, 1000).sort()
   };
+}
+/* v65：共享账号库里的一条账号（只存一份，多服务共用） */
+function sanitizeVaultAccount(v) {
+  if (!v || typeof v !== 'object') return null;
+  const label = String(v.label || '').trim().slice(0, 30);
+  const username = String(v.username || '').trim().slice(0, 200);
+  const password = String(v.password || '').slice(0, 500);
+  if (!label && !username && !password) return null;
+  return {
+    id: String(v.id || randomBytes(6).toString('hex')).slice(0, 32),
+    label: label || '账号',
+    username,
+    password,
+    notes: String(v.notes || '').trim().slice(0, 200),
+    passwordChangedAt: (/^\d{4}-\d{2}-\d{2}$/.test(String(v.passwordChangedAt || ''))) ? String(v.passwordChangedAt) : undefined
+  };
+}
+/* v65：读时解析——服务里链接了共享账号库的账号，用户名/密码/备注以库为准
+   （改库里的密码，所有链接的服务读出来就跟着变）；库里找不到这条（已被删）
+   时保留服务里存的快照，账号自动变回本地副本。 */
+function resolveVaultAccounts(data) {
+  const vault = Array.isArray(data.sharedAccounts) ? data.sharedAccounts : [];
+  if (!vault.length) return;
+  const byId = new Map(vault.map((v) => [String(v.id), v]));
+  for (const s of (data.services || [])) {
+    for (const a of (Array.isArray(s.accounts) ? s.accounts : [])) {
+      if (!a.sharedId) continue;
+      const v = byId.get(String(a.sharedId));
+      if (!v) continue;
+      a.label = v.label || a.label;
+      a.username = v.username || '';
+      a.password = v.password || '';
+      a.notes = v.notes || '';
+      a.passwordChangedAt = v.passwordChangedAt;
+    }
+  }
 }
 function normalizeAccounts(svc) {
   if (!Array.isArray(svc.accounts)) svc.accounts = [];
@@ -676,6 +736,14 @@ function pickFields(b, existing, catIds) {
       if ((!a.checkins || !a.checkins.length) && existingById.has(s.id)) {
         const old = existingById.get(s.id);
         if (Array.isArray(old.checkins)) s.checkins = old.checkins.filter((d) => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d)).slice(0, 1000).sort();
+      }
+      /* v65：密码变了（或新账号）就记今天为上次改密日期；没变就沿用旧日期；
+         客户端直接传了合法日期也认（比如从库里链接过来时带的快照） */
+      const old = existingById.get(s.id);
+      if (s.password && (!old || old.password !== s.password)) {
+        s.passwordChangedAt = todayStr();
+      } else if (old && old.passwordChangedAt && !s.passwordChangedAt) {
+        s.passwordChangedAt = old.passwordChangedAt;
       }
       return s;
     }).filter(Boolean).slice(0, 20);
@@ -800,10 +868,78 @@ function daysUntilSrv(dateStr) {
   return Math.round((new Date(y, m - 1, d) - new Date(ty, tm - 1, td)) / 86400e3);
 }
 function expiringList(data) {
+  /* v65：已归档的服务不计入临期提醒 */
   return data.services
-    .filter((s) => s.expiresAt && daysUntilSrv(s.expiresAt) <= 30)
+    .filter((s) => s.expiresAt && !isArchived(s) && daysUntilSrv(s.expiresAt) <= 30)
     .map((s) => ({ s, d: daysUntilSrv(s.expiresAt) }))
     .sort((a, b) => a.d - b.d);
+}
+/* v65：某服务某月的在线率（linkHistory 里当月的探活记录；没有记录返回 null） */
+function uptimeInMonth(svc, yearMonth) {
+  const hist = (Array.isArray(svc?.linkHistory) ? svc.linkHistory : []).filter((h) => h && typeof h.t === 'number' && typeof h.ok === 'boolean');
+  if (!hist.length) return null;
+  const [y, m] = yearMonth.split('-').map(Number);
+  const start = Date.UTC(y, m - 1, 1);
+  const end = Date.UTC(y, m, 1);
+  const inMonth = hist.filter((h) => h.t >= start && h.t < end);
+  if (!inMonth.length) return null;
+  return {
+    rate: Math.round((inMonth.filter((h) => h.ok).length / inMonth.length) * 100),
+    count: inMonth.length
+  };
+}
+/* v65：超 90 天没换密码的账号（只认有 passwordChangedAt 的；老账号“未知”不算） */
+function stalePasswordAccounts(data, t) {
+  const out = [];
+  const isStale = (acc) => {
+    if (!acc || !/^\d{4}-\d{2}-\d{2}$/.test(String(acc.passwordChangedAt || ''))) return false;
+    return dayDiff(acc.passwordChangedAt, t) > 90;
+  };
+  for (const s of (data.services || [])) {
+    for (const a of serviceAccounts(s)) {
+      if (isStale(a)) out.push({ serviceId: s.id, service: s.name, label: a.label || '', username: a.username || '', changedAt: a.passwordChangedAt });
+    }
+  }
+  return out;
+}
+/* v65：月度报告（纯函数，可单元测试）。yearMonth 是 'YYYY-MM'（要生成的月份，
+   比如 2026-10）。签到天数/总次数/签到攒的经验都从 history 里算；新增服务按
+   registeredAt 落在当月算；到期提醒数按 expiresAt 落在当月算；在线率最低的 3 个
+   服务按 linkHistory 当月记录算（没记录的不参与）。 */
+function buildMonthlyReport(data, yearMonth) {
+  const hist = data.history || {};
+  let days = 0, totalCk = 0, xp = 0;
+  for (const [d, h] of Object.entries(hist)) {
+    if (!d.startsWith(yearMonth + '-')) continue;
+    if ((h.c || 0) > 0) days++;
+    totalCk += (h.c || 0);
+    xp += (h.x || 0) + (h.all ? 10 : 0);
+  }
+  let top = null, topN = 0;
+  for (const s of (data.services || [])) {
+    const n = (s.checkins || []).filter((d) => d.startsWith(yearMonth + '-')).length;
+    if (n > topN) { topN = n; top = s; }
+  }
+  const newServices = (data.services || []).filter((s) => (s.registeredAt || '').startsWith(yearMonth + '-')).length;
+  const expiring = (data.services || []).filter((s) => (s.expiresAt || '').startsWith(yearMonth + '-')).length;
+  const lowest = (data.services || [])
+    .map((s) => ({ s, u: uptimeInMonth(s, yearMonth) }))
+    .filter((x) => x.u)
+    .sort((a, b) => a.u.rate - b.u.rate || b.u.count - a.u.count)
+    .slice(0, 3)
+    .map((x) => ({ name: x.s.name, rate: x.u.rate, count: x.u.count }));
+  return {
+    month: yearMonth,
+    days,
+    totalCk,
+    xp,
+    topService: top ? top.name : null,
+    topCount: topN,
+    newServices,
+    expiring,
+    lowestUptime: lowest,
+    generatedAt: cstDateTime()
+  };
 }
 function addYear(dateStr) {
   const [y, m, d] = dateStr.split('-').map(Number);
@@ -934,8 +1070,11 @@ async function runNotifyChecks(db) {
       const todo = unsignedDaily(data, t);
       let ok = true;
       if (todo.length) {
+        /* v65：密码轮换提醒——有账号超 90 天没换密码时，在签到提醒里加一句 */
+        const stale = stalePasswordAccounts(data, t);
+        const staleLine = stale.length ? `\n\n🔑 另外还有 ${stale.length} 个账号密码超 90 天没换了，记得去换（数据中心「该换密码了」里有名单）。` : '';
         ok = await tryPush(`服务台签到提醒 · ${t}`,
-          `⚡ <b>服务台签到提醒</b> · ${t}\n今日还有 ${todo.length} 个站未签到：\n\n${checkinLines(todo).join('\n')}\n\n👉 点下面按钮直接签完，别断了连签。`, CHECKIN_KB);
+          `⚡ <b>服务台签到提醒</b> · ${t}\n今日还有 ${todo.length} 个站未签到：\n\n${checkinLines(todo).join('\n')}\n\n👉 点下面按钮直接签完，别断了连签。${staleLine}`, CHECKIN_KB);
       }
       if (ok) { n.lastCheckin = t; n.lastCheckinRepeatAt = Date.now(); dirty = true; }
     }
@@ -1085,12 +1224,63 @@ async function probeLink(u) {
     return 'dead';
   } catch { return 'dead'; }
 }
+/* v65：SSL 证书到期日——Workers 里 fetch 读不到证书，改用 crt.sh 公开 API。
+   取该域名下“当前有效”（not_before <= 现在 < not_after）且 not_after 最晚的那张
+   证书的到期日。crt.sh 有速率限制：失败就返回 null（跳过，不报错、不重试）。 */
+async function checkCertExpiry(host) {
+  try {
+    const res = await fetch(`https://crt.sh/?q=${encodeURIComponent(host)}&output=json`, {
+      signal: AbortSignal.timeout(6000),
+      headers: { 'User-Agent': 'hubmate' }
+    });
+    if (!res.ok) return null;
+    const list = await res.json().catch(() => null);
+    if (!Array.isArray(list)) return null;
+    const now = Date.now();
+    let best = null;
+    for (const c of list) {
+      if (!c || typeof c.not_after !== 'string' || typeof c.not_before !== 'string') continue;
+      /* 只认明确包含这个域名的证书（name_value 里多行，每行一个域名；通配符 *.example.com 也认） */
+      const names = String(c.name_value || '').split('\n').map((x) => x.trim().toLowerCase());
+      const hit = names.some((n) => n === host || (n.startsWith('*.') && host.endsWith(n.slice(1))));
+      if (!hit) continue;
+      const nb = Date.parse(c.not_before), na = Date.parse(c.not_after);
+      if (!Number.isFinite(nb) || !Number.isFinite(na)) continue;
+      if (nb <= now && na > now && (!best || na > best)) best = na;
+    }
+    if (!best) return null;
+    return new Date(best).toISOString().slice(0, 10); // YYYY-MM-DD
+  } catch { return null; }
+}
 async function checkLinks(db) {
   try {
     const data = await loadData(db);
     const t = todayStr();
     const now = Date.now();
     const results = await Promise.all(data.services.map(async (s) => ({ id: s.id, st: await probeLink(s.url) })));
+    /* v65：证书到期监控——只对 https 的站查，每天每个域名最多查一次（按 certCheckedAt
+       记日期），crt.sh 失败就跳过，绝不影响死链检测本身。每轮最多查 9 个域名（每批 3 个
+       并发），剩下的下一轮再查，免得定时任务超时 */
+    const certHosts = new Map(); // host -> [service ids]
+    for (const s of data.services) {
+      let host = '';
+      try {
+        const u = new URL(/^https?:\/\//i.test(s.url || '') ? s.url : 'https://' + (s.url || ''));
+        if (u.protocol !== 'https:') continue;
+        host = u.hostname.toLowerCase();
+      } catch { continue; }
+      if (!host || s.certCheckedAt === t) continue;
+      if (!certHosts.has(host)) certHosts.set(host, []);
+      certHosts.get(host).push(s.id);
+      if (certHosts.size >= 9) break;
+    }
+    const certResults = new Map(); // host -> YYYY-MM-DD | null
+    const certHostList = [...certHosts.keys()];
+    for (let i = 0; i < certHostList.length; i += 3) {
+      const batch = certHostList.slice(i, i + 3);
+      const outs = await Promise.all(batch.map((h) => checkCertExpiry(h)));
+      batch.forEach((h, j) => certResults.set(h, outs[j]));
+    }
     const fresh = await loadData(db);
     let changed = false;
     for (const { id, st } of results) {
@@ -1101,6 +1291,16 @@ async function checkLinks(db) {
         s.linkHistory = (Array.isArray(s.linkHistory) ? s.linkHistory : []).filter((h) => h && typeof h.t === 'number');
         s.linkHistory.push({ t: now, ok: st === 'ok' });
         if (s.linkHistory.length > 120) s.linkHistory = s.linkHistory.slice(-120);
+        changed = true;
+      }
+    }
+    for (const [host, ids] of certHosts) {
+      const exp = certResults.get(host);
+      for (const id of ids) {
+        const s = fresh.services.find((x) => x.id === id);
+        if (!s) continue;
+        s.certCheckedAt = t;
+        if (exp) s.certExpiresAt = exp;
         changed = true;
       }
     }
@@ -1157,6 +1357,66 @@ async function runAutoSignins(db) {
     if (results.length) console.log(`[auto-signin] ${results.filter((r) => r.ok).length}/${results.length} 成功`);
     return results;
   } catch (e) { console.error('[!] 自动签到异常:', e.message); return null; }
+}
+
+/* v65：月度报告——每月 1 号（北京时间）生成上月的报告并推多渠道。
+   每小时跑一轮时检查：上月报告还没生成就生成并推送（只推一次，生成后就记下来了）。 */
+function prevMonthStr() {
+  const [y, m] = todayStr().split('-').map(Number);
+  const d = new Date(Date.UTC(y, m - 2, 1));
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+async function runMonthlyReport(db, force) {
+  try {
+    const data = await loadData(db);
+    const ym = prevMonthStr();
+    if (!Array.isArray(data.monthlyReports)) data.monthlyReports = [];
+    if (data.monthlyReports.some((r) => r && r.month === ym)) return { ok: true, skipped: true, month: ym };
+    const report = buildMonthlyReport(data, ym);
+    data.monthlyReports.push(report);
+    data.monthlyReports = data.monthlyReports.slice(-12);
+    await saveData(db, data);
+    const n = notifyCfg(data);
+    const hasChannel = (n.token && n.chatId) || n.webhookUrl || n.barkKey || n.serverChanKey;
+    if (hasChannel) {
+      const low = report.lowestUptime.length
+        ? report.lowestUptime.map((x) => `• ${x.name}：${x.rate}%（${x.count} 次探测）`).join('\n')
+        : '本月没有在线率数据';
+      const text = `📊 <b>月度报告 · ${ym}</b>\n签到 ${report.days} 天 · 共 ${report.totalCk} 次 · 攒了 ${report.xp}⚡\n最常签到：${report.topService ? `${report.topService}（${report.topCount} 次）` : '—'}\n新增服务 ${report.newServices} 个 · 当月到期 ${report.expiring} 个\n\n📉 本月在线率最低：\n${low}`;
+      await sendMultiChannel(n, `月度报告 · ${ym}`, text).catch((e) => console.error('[!] 月度报告推送失败:', e.message));
+    }
+    return { ok: true, month: ym, report };
+  } catch (e) { console.error('[!] 月度报告异常:', e.message); return { ok: false, note: e.message }; }
+}
+/* v65：到期自动归档——每天跑一次：到期日超过 30 天还没续的服务，自动归到
+   “已归档”分类（不存在就新建，图标 🗄️）；归档记录记在 meta.archivedLog 里。
+   归档的服务不计入签到队列/临期提醒/Telegram 提醒（dailyServices 和 expiringList
+   里已经排除了）；用户手动把分类改回去就恢复正常。 */
+async function runAutoArchive(db) {
+  try {
+    const data = await loadData(db);
+    const t = todayStr();
+    const cats = ensureCategories(data);
+    let archivedCat = cats.find((c) => c.id === ARCHIVED_CAT.id);
+    const toArchive = data.services.filter((s) => {
+      if (!s.expiresAt || isArchived(s)) return false;
+      return dayDiff(s.expiresAt, t) > 30;
+    });
+    if (!toArchive.length) return { ok: true, archived: 0 };
+    if (!archivedCat) {
+      archivedCat = { ...ARCHIVED_CAT };
+      cats.push(archivedCat);
+    }
+    if (!Array.isArray(data.archivedLog)) data.archivedLog = [];
+    for (const s of toArchive) {
+      s.category = ARCHIVED_CAT.id;
+      data.archivedLog.push({ id: s.id, name: s.name, at: cstDateTime() });
+    }
+    data.archivedLog = data.archivedLog.slice(-50);
+    await saveData(db, data);
+    console.log(`[auto-archive] 归档 ${toArchive.length} 个：${toArchive.map((s) => s.name).join('、')}`);
+    return { ok: true, archived: toArchive.length, names: toArchive.map((s) => s.name) };
+  } catch (e) { console.error('[!] 自动归档异常:', e.message); return { ok: false, note: e.message }; }
 }
 
 /* ---------- GitHub 自动备份 ---------- */
@@ -1254,6 +1514,42 @@ async function jsonBody(request) {
   return request._bodyJson;
 }
 
+/* v65：登录历史——每次登录成功记一条（时间、IP、UA 粗存，保留最近 50 条）；
+   本次登录 IP 和上一次不同时，多渠道发一条异地登录提醒。登录接口返回时不带历史。 */
+function parseDevice(ua) {
+  const s = String(ua || '');
+  let os = '未知设备';
+  if (/iPhone/i.test(s)) os = 'iPhone';
+  else if (/iPad/i.test(s)) os = 'iPad';
+  else if (/Android/i.test(s)) os = 'Android';
+  else if (/Windows/i.test(s)) os = 'Windows';
+  else if (/Mac OS X/i.test(s)) os = 'Mac';
+  else if (/Linux/i.test(s)) os = 'Linux';
+  let br = '';
+  if (/Edg\//i.test(s)) br = 'Edge';
+  else if (/Chrome\//i.test(s)) br = 'Chrome';
+  else if (/Safari\//i.test(s) && !/Chrome/i.test(s)) br = 'Safari';
+  else if (/Firefox\//i.test(s)) br = 'Firefox';
+  return br ? `${os} · ${br}` : os;
+}
+async function recordLogin(db, data, request) {
+  const ip = clientIp(request);
+  const ua = String(request.headers.get('user-agent') || '').slice(0, 300);
+  if (!Array.isArray(data.loginHistory)) data.loginHistory = [];
+  const prev = data.loginHistory[data.loginHistory.length - 1];
+  data.loginHistory.push({ at: cstDateTime(), ip, ua });
+  data.loginHistory = data.loginHistory.slice(-50);
+  await saveData(db, data);
+  if (prev && prev.ip && prev.ip !== ip) {
+    const n = notifyCfg(data);
+    const hasChannel = (n.token && n.chatId) || n.webhookUrl || n.barkKey || n.serverChanKey;
+    if (hasChannel) {
+      await sendMultiChannel(n, '异地登录提醒',
+        `🔐 <b>异地登录提醒</b>\n刚才有人从新 IP 登录了你的服务台：\nIP：${ip}\n设备：${escHtml(parseDevice(ua))}\n时间：${cstDateTime()}（北京时间）\n上次登录 IP：${prev.ip}\n如果不是你，请立即改密码并检查账号。`).catch((e) => console.error('[!] 异地登录提醒失败:', e.message));
+    }
+  }
+}
+
 async function handleAPI(request, env, pathname) {
   const db = env.DB;
   const method = request.method;
@@ -1286,6 +1582,8 @@ async function handleAPI(request, env, pathname) {
       if (!(await verifyTotp(data.totpSecret, body.totp))) return send(401, { error: '二次验证失败' });
     }
     const token = await createSession(db);
+    /* v65：登录成功记一条登录历史；IP 和上次不同时发异地提醒（在 recordLogin 里） */
+    await recordLogin(db, data, request);
     /* Workers 线上永远是 HTTPS，给 Cookie 加 Secure；本地 wrangler dev 是 http，
        加了 Secure 浏览器/curl 反而不会把 Cookie 发回来，所以只在 https 请求上加 */
     const secure = new URL(request.url).protocol === 'https:' ? '; Secure' : '';
@@ -1366,6 +1664,78 @@ async function handleAPI(request, env, pathname) {
     delete data.apiToken;
     await saveData(db, data);
     return send(200, { ok: true });
+  }
+  /* v65：共享账号库——账号只存一份，多服务共用。GET 列出；POST 按 action 增删改。
+     改库里的密码，所有链接的服务读时跟着变（loadData 里解析）；删库里的账号时，
+     链接它的服务保留快照，自动变回本地副本。 */
+  if (pathname === '/api/vault' && method === 'GET') {
+    const data = await loadData(db);
+    return send(200, { accounts: Array.isArray(data.sharedAccounts) ? data.sharedAccounts : [] });
+  }
+  if (pathname === '/api/vault' && method === 'POST') {
+    const body = await jsonBody(request);
+    const data = await loadData(db);
+    if (!Array.isArray(data.sharedAccounts)) data.sharedAccounts = [];
+    const action = String(body.action || '');
+    if (action === 'create') {
+      const v = sanitizeVaultAccount(body.account || {});
+      if (!v) return send(400, { error: '账号内容不对' });
+      if (v.password) v.passwordChangedAt = todayStr();
+      data.sharedAccounts.push(v);
+      await saveData(db, data);
+      return send(200, { ok: true, account: v });
+    }
+    if (action === 'update') {
+      const id = String(body.id || '');
+      const idx = data.sharedAccounts.findIndex((v) => String(v.id) === id);
+      if (idx < 0) return send(404, { error: '找不到这条账号' });
+      const old = data.sharedAccounts[idx];
+      const v = sanitizeVaultAccount({ ...old, ...(body.account || {}), id });
+      if (!v) return send(400, { error: '账号内容不对' });
+      /* 密码变了就记今天为上次改密日期；没变沿用旧日期 */
+      if (v.password && old.password !== v.password) v.passwordChangedAt = todayStr();
+      else if (old.passwordChangedAt && !v.passwordChangedAt) v.passwordChangedAt = old.passwordChangedAt;
+      data.sharedAccounts[idx] = v;
+      resolveVaultAccounts(data); // 改完立刻把新密码写进各链接服务的快照
+      await saveData(db, data);
+      return send(200, { ok: true, account: v });
+    }
+    if (action === 'delete') {
+      const id = String(body.id || '');
+      const idx = data.sharedAccounts.findIndex((v) => String(v.id) === id);
+      if (idx < 0) return send(404, { error: '找不到这条账号' });
+      data.sharedAccounts.splice(idx, 1);
+      /* 删库账号：链接它的服务保留快照变回本地副本（去掉 sharedId，账号密码不动） */
+      for (const s of data.services) {
+        for (const a of (Array.isArray(s.accounts) ? s.accounts : [])) {
+          if (a.sharedId === id) delete a.sharedId;
+        }
+        normalizeAccounts(s);
+      }
+      await saveData(db, data);
+      return send(200, { ok: true });
+    }
+    return send(400, { error: 'action 不对（create/update/delete）' });
+  }
+  /* v65：最近登录——最近 10 条（时间、IP、设备），登录接口不返回历史 */
+  if (pathname === '/api/login-history' && method === 'GET') {
+    const data = await loadData(db);
+    const list = (Array.isArray(data.loginHistory) ? data.loginHistory : []).slice(-10).reverse()
+      .map((h) => ({ at: h.at || '', ip: h.ip || '', device: parseDevice(h.ua || '') }));
+    return send(200, { logins: list });
+  }
+  /* v65：月度报告——手动生成上月报告（每月 1 号定时也会自动生成） */
+  if (pathname === '/api/monthly-report/run' && method === 'POST') {
+    const r = await runMonthlyReport(db, true);
+    if (!r.ok) return send(500, { error: r.note || '生成失败' });
+    if (r.skipped) return send(200, { ok: true, skipped: true, month: r.month });
+    return send(200, { ok: true, month: r.month, report: r.report });
+  }
+  /* v65：到期自动归档——手动跑一次（每天 04:00 UTC 定时也会自动跑） */
+  if (pathname === '/api/archive/run' && method === 'POST') {
+    const r = await runAutoArchive(db);
+    if (!r.ok) return send(500, { error: r.note || '归档失败' });
+    return send(200, { ok: true, archived: r.archived || 0, names: r.names || [] });
   }
   if (pathname === '/api/github-backup/status' && method === 'GET') {
     const data = await loadData(db);
@@ -1684,6 +2054,9 @@ async function handleAPI(request, env, pathname) {
       sortOrder: Number(s.sortOrder) || 0,
       linkStatus: s.linkStatus,
       linkHistory: (Array.isArray(s.linkHistory) ? s.linkHistory : []).filter((h) => h && typeof h.t === 'number' && typeof h.ok === 'boolean').slice(-120),
+      /* v65：证书到期日和检查日期也随备份恢复 */
+      certExpiresAt: (/^\d{4}-\d{2}-\d{2}$/.test(String(s.certExpiresAt || ''))) ? String(s.certExpiresAt) : undefined,
+      certCheckedAt: (/^\d{4}-\d{2}-\d{2}$/.test(String(s.certCheckedAt || ''))) ? String(s.certCheckedAt) : undefined,
       renewHistory: (Array.isArray(s.renewHistory) ? s.renewHistory : []).filter((h) => h && /^\d{4}-\d{2}-\d{2}$/.test(h.at || '') && typeof h.from === 'string' && typeof h.to === 'string').slice(-20),
       tags: (Array.isArray(s.tags) ? s.tags : []).map((t) => String(t).trim().slice(0, 20)).filter(Boolean).slice(0, 10),
       customFields: sanitizeCustomFields(s.customFields),
@@ -1696,6 +2069,11 @@ async function handleAPI(request, env, pathname) {
     if (imp.achievements && typeof imp.achievements === 'object') data.achievements = imp.achievements;
     if (Number(imp.xp) >= 0) data.xp = Number(imp.xp);
     if (imp.flags && typeof imp.flags === 'object') data.flags = imp.flags;
+    /* v65：备份里带回来的共享账号库、月度报告、归档记录、登录历史也一并恢复 */
+    if (Array.isArray(imp.sharedAccounts)) data.sharedAccounts = imp.sharedAccounts.map(sanitizeVaultAccount).filter(Boolean).slice(0, 200);
+    if (Array.isArray(imp.monthlyReports)) data.monthlyReports = imp.monthlyReports.filter((r) => r && typeof r.month === 'string').slice(-12);
+    if (Array.isArray(imp.archivedLog)) data.archivedLog = imp.archivedLog.filter((r) => r && typeof r.id === 'string').slice(-50);
+    if (Array.isArray(imp.loginHistory)) data.loginHistory = imp.loginHistory.filter((r) => r && typeof r.at === 'string').slice(-50);
     if (imp.notify && typeof imp.notify === 'object') {
       const n = notifyCfg(data);
       const keep = { token: n.token, webhookUrl: n.webhookUrl, barkKey: n.barkKey, serverChanKey: n.serverChanKey };
@@ -2059,18 +2437,25 @@ export default {
   },
 
   /* 定时任务：按 wrangler.toml 里的 Cron 表达式分发（每分钟 TG 轮询、每小时提醒+
-     自动签到、每 6 小时死链检测、每天 04:00 UTC GitHub 备份） */
+     自动签到、每 6 小时死链检测、每天 04:00 UTC GitHub 备份；v65：每月 1 号生成月度
+     报告、每天自动归档过期服务） */
   async scheduled(event, env, ctx) {
     const db = env.DB;
     try {
       if (event.cron === '* * * * *') {
         ctx.waitUntil(pollBotCommands(db));
       } else if (event.cron === '0 * * * *') {
-        ctx.waitUntil((async () => { await runNotifyChecks(db); await runAutoSignins(db); })());
+        ctx.waitUntil((async () => {
+          await runNotifyChecks(db);
+          await runAutoSignins(db);
+          /* v65：每月 1 号（北京时间）生成上月报告并推送；runMonthlyReport 自己判断
+             上月报告是否已生成，没生成才推，已生成就直接跳过 */
+          if (todayStr().endsWith('-01')) await runMonthlyReport(db);
+        })());
       } else if (event.cron === '0 */6 * * *') {
         ctx.waitUntil(checkLinks(db));
       } else if (event.cron === '0 4 * * *') {
-        ctx.waitUntil(pushGithubBackup(db));
+        ctx.waitUntil((async () => { await pushGithubBackup(db); await runAutoArchive(db); })());
       }
     } catch (e) {
       console.error('[!] 定时任务异常:', e.message);

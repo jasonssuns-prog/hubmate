@@ -11,7 +11,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="apple-touch-icon" href="/icon-180.png">
-<link rel="stylesheet" href="/style.css?v=20261108-w1">
+<link rel="stylesheet" href="/style.css?v=20261108-w2">
 </head>
 <body class="mode-preview" data-theme="neon">
 
@@ -107,6 +107,9 @@
       <a href="#sec-github" class="nav-item live-only"><i>☁️</i>GitHub 备份</a>
       <a href="#sec-dupes" class="nav-item live-only"><i>♻️</i>重复清理</a>
       <a href="#sec-pwreuse" class="nav-item live-only"><i>🔐</i>密码复用 <span class="nav-badge" id="pwreuse-nav-count"></span></a>
+      <a href="#sec-vault" class="nav-item live-only"><i>🔐</i>账号库</a>
+      <a href="#sec-monthly" class="nav-item live-only"><i>📊</i>月度报告</a>
+      <a href="#sec-logins" class="nav-item live-only"><i>🕐</i>最近登录</a>
       <a href="#sec-cats" class="nav-item live-only"><i>🏷️</i>分类管理</a>
       <a href="#sec-notes" class="nav-item live-only"><i>📝</i>记事本</a>
     </nav>
@@ -227,7 +230,10 @@
         <h2>⏰ 临期提醒</h2>
         <span id="expiring-count" class="muted"></span>
       </div>
-      <div class="help-fold"><button class="help-toggle" type="button">📖 说明 ▾</button><div class="help-body"><p class="muted">30 天内到期（含已过期）的服务，按最紧急的排在最前。点名称直达官网去办理，办完后点“编辑”更新到期时间。</p></div></div>
+      <div class="help-fold"><button class="help-toggle" type="button">📖 说明 ▾</button><div class="help-body"><p class="muted">30 天内到期（含已过期）的服务，按最紧急的排在最前。点名称直达官网去办理，办完后点“编辑”更新到期时间。证书那行是 SSL 证书到期日（<30 天标红），证书过期了网站会打不开，和服务到期是两回事。到期超过 30 天没续的服务每天会自动归到“已归档”分类，归档的不进签到和临期提醒，手动改回分类就恢复。</p></div></div>
+      <div class="modal-acts" style="justify-content:flex-start">
+        <button id="btn-archive-run" class="btn ghost small" title="把到期超过 30 天没续的服务归到“已归档”分类">🗄️ 立即归档过期服务</button>
+      </div>
       <div id="expiring-list"></div>
       <div id="expiry-calendar"></div>
       <div id="cal-day-list"></div>
@@ -307,6 +313,15 @@
       <p class="muted" id="totp-msg">启用步骤：点“生成密钥”→ 在 Authenticator 里手动添加账号，密钥填上面那串（或把 otpauth 链接粘到支持的工具里）→ 输一次动态码点“启用二次验证”。</p>
     </section>
 
+    <section class="panel live-only" id="sec-logins">
+      <div class="panel-head">
+        <h2>🕐 最近登录</h2>
+        <span class="muted">最近 10 次</span>
+      </div>
+      <div class="help-fold"><button class="help-toggle" type="button">📖 说明 ▾</button><div class="help-body"><p class="muted">每次登录成功记一条（时间、IP、设备）。如果某次登录的 IP 和上一次不一样，会推一条异地登录提醒到 Telegram / 你配的其他渠道；不是你登的，立刻改密码。</p></div></div>
+      <div id="logins-list"></div>
+    </section>
+
     <section class="panel live-only" id="sec-github">
       <div class="panel-head">
         <h2>☁️ GitHub 备份</h2>
@@ -344,6 +359,36 @@
       </div>
       <div class="help-fold"><button class="help-toggle" type="button">📖 说明 ▾</button><div class="help-body"><p class="muted">同一个密码用在多个账号上，一个站泄露了，其他站也跟着危险。下面按密码分组列出，点眼睛看密码原文，建议给这些账号换成不同的密码。只统计已录进来的账号，没录的不算。</p></div></div>
       <div id="pwreuse-list"></div>
+    </section>
+
+    <section class="panel live-only" id="sec-vault">
+      <div class="panel-head">
+        <h2>🔐 共享账号库</h2>
+        <span id="vault-count" class="muted"></span>
+      </div>
+      <div class="help-fold"><button class="help-toggle" type="button">📖 说明 ▾</button><div class="help-body"><p class="muted">一个账号只存一份，多服务共用：比如同一个邮箱账号在 3 个站都用，存进库里一次，3 个服务都链它；以后改一次密码，3 处跟着变。删库里的账号时，链它的服务自动变回本地副本（账号密码还留在服务里）。库里的密码只在登录后可见，公开页和备份里都不露密码原文之外的东西——备份里有完整数据，妥善保管。</p></div></div>
+      <div class="modal-acts" style="justify-content:flex-start">
+        <button id="btn-vault-add" class="btn primary">➕ 添加账号</button>
+      </div>
+      <div id="vault-form" class="hidden">
+        <div class="fgrid">
+          <label>账号名称<input id="v-label" placeholder="如：我的邮箱"></label>
+          <label>账号<input id="v-username" placeholder="账号"></label>
+          <label class="span2">密码 / 密钥
+            <span style="display:flex;gap:8px">
+              <input id="v-password" placeholder="密码 / 密钥" style="flex:1;min-width:0">
+              <select id="v-pw-len" style="width:74px;flex:none" title="生成密码的长度"><option value="12">12位</option><option value="16" selected>16位</option><option value="20">20位</option><option value="24">24位</option></select>
+              <button id="v-gen-pw" class="btn ghost" type="button" title="生成一个随机强密码">🎲 生成</button>
+            </span>
+          </label>
+          <label class="span2">备注（可选）<input id="v-notes" placeholder="备注（可选）"></label>
+        </div>
+        <div class="modal-acts">
+          <button id="vault-form-cancel" class="btn ghost" type="button">取消</button>
+          <button id="vault-form-save" class="btn primary" type="button">存入账号库</button>
+        </div>
+      </div>
+      <div id="vault-list"></div>
     </section>
 
     <section class="panel live-only" id="sec-cats">
@@ -429,6 +474,9 @@
       <section class="panel">
         <div class="panel-head"><h2>🏆 成就墙</h2><span id="ach-count" class="muted"></span></div>
         <div id="ach-grid" class="ach-grid"></div>
+        <div class="modal-acts" style="justify-content:flex-start;margin-top:10px">
+          <button id="btn-share-card" class="btn ghost small live-only" title="把本月签到成绩画成一张图下载分享">📤 分享我的签到</button>
+        </div>
       </section>
     </div>
     <section class="panel live-only" id="sec-health">
@@ -442,6 +490,28 @@
         <span id="uptime-summary" class="muted"></span>
       </div>
       <canvas id="uptime-chart" class="trend"></canvas>
+    </section>
+    <section class="panel live-only" id="sec-secscore">
+      <div class="panel-head"><h2>🔐 最不安全的 5 个账号</h2><span class="muted">密码太短、缺字符种类、多处复用、超 90 天没换都会扣分</span></div>
+      <div class="help-fold"><button class="help-toggle" type="button">📖 说明 ▾</button><div class="help-body"><p class="muted">分数 0–100：长度、字符种类、是否复用、改密时间都算。点“去改”进账号管理弹窗换密码；换完分数就上去了。没记改密时间的老账号显示“改密时间未知”，不扣分，改一次密码就记上了。</p></div></div>
+      <div id="secscore-list"></div>
+    </section>
+    <section class="panel live-only" id="sec-rotate">
+      <div class="panel-head"><h2>🔑 该换密码了</h2><span id="rotate-count" class="muted"></span></div>
+      <div class="help-fold"><button class="help-toggle" type="button">📖 说明 ▾</button><div class="help-body"><p class="muted">上次改密码超过 90 天的账号。每天签到提醒里也会提一句有几个超期。点“去改”进账号管理弹窗，换完密码就从名单里消失。</p></div></div>
+      <div id="rotate-list"></div>
+    </section>
+    <section class="panel live-only" id="sec-monthly">
+      <div class="panel-head"><h2>📊 月度报告</h2><span class="muted">每月 1 号自动生成上月报告并推送</span></div>
+      <div class="help-fold"><button class="help-toggle" type="button">📖 说明 ▾</button><div class="help-body"><p class="muted">每月 1 号（北京时间）自动生成上个月的报告：签到天数、总签到次数、签到攒的经验、最常签到的服务、新增服务、当月到期、本月在线率最低的 3 个服务，并推送到 Telegram / 你配的其他渠道。最近 6 个月列在这里。</p></div></div>
+      <div class="modal-acts" style="justify-content:flex-start">
+        <button id="btn-monthly-gen" class="btn ghost small">📊 生成上月报告</button>
+      </div>
+      <div id="monthly-list"></div>
+    </section>
+    <section class="panel live-only" id="sec-avail">
+      <div class="panel-head"><h2 id="avail-title">📊 本月可用性</h2><span class="muted">按本月探活记录算，在线率从低到高</span></div>
+      <div id="avail-list"></div>
     </section>
 
     <footer class="foot">
@@ -493,6 +563,7 @@
           <option value="idle">🧟 已闲置</option>
         </select>
       </label>
+      <div id="cat-suggest" class="hidden span2" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="muted" id="cat-suggest-text"></span><button id="btn-cat-apply" class="btn small primary" type="button">应用推荐</button></div>
       <label class="span2">网址<input id="f-url" placeholder="https://…"></label>
       <label class="span2">标签（逗号分隔，比如 VPS，免费；一个服务可打多个标签）<input id="f-tags" placeholder="比如 VPS，免费"></label>
       <label>注册 / 购买日期<input id="f-registered" type="date"></label>
@@ -591,6 +662,6 @@
 </div>
 
 <div id="toast"></div>
-<script src="/app.js?v=20261108-w1"></script>
+<script src="/app.js?v=20261108-w2"></script>
 </body>
 </html>

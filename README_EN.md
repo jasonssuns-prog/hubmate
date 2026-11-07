@@ -99,6 +99,19 @@ Pure Node.js with **zero dependencies** (no `npm install`), data lives in a sing
 - **Browser extension**: for desktop Chrome / Edge (in `browser-extension/`, an add-on in the repo): save the current page as a service in one click, and autofill accounts by domain on login pages; see `browser-extension/README.md` for how to load it
 - **Fix**: restoring a backup no longer drops multi-account data or the "abnormal" flag (restore used to keep only the default account)
 
+### What's new (v65)
+- **Shared account vault**: one account stored once, linked from many services; change the vault password and every linked service follows; deleting a vault account turns linked services back into local copies. The accounts dialog has "Pick from vault" and "Save to vault"
+- **Account security score**: every account scores 0–100 (length, character variety, reuse, password older than 90 days all deduct); low scores light up red on the card, and the data center lists the 5 least secure accounts
+- **SSL certificate expiry monitoring**: link checks also look up each site's HTTPS certificate expiry (via crt.sh); under 30 days it shows red in the expiring panel and on the card; failures are skipped silently and never break link checks
+- **Smart category suggestions**: when adding/editing a service, the category and tags are suggested from the URL and name; one tap fills them in (a missing category is created automatically)
+- **Password rotation reminders**: accounts whose password hasn't changed in 90+ days are listed in the data center ("Time to change passwords"), and the daily check-in reminder mentions how many are overdue
+- **Monthly report**: auto-generated on the 1st of each month and pushed (check-in days, total check-ins, XP earned, most-checked service, new services, expiring count, 3 lowest-uptime services); the data center lists the last 6 months
+- **Check-in share card**: a "Share my check-ins" button in the data center draws a stats card on canvas (this month's check-in days, streak, XP, level, most-checked service) and downloads it as PNG
+- **Login history & unusual-login alerts**: every successful login is logged (time, IP, device); settings show the last 10; a login from a new IP triggers an alert
+- **Auto-archive expired services**: services expired for 30+ days are auto-moved to an "Archived" category (🗄️) daily; archived services leave the check-in queue, expiring reminders, and Telegram reminders; changing the category back restores them
+- **iOS Shortcuts templates**: `shortcuts/` has ready-made instructions — "Sign all" (POST /api/checkins/all with a Bearer token) and "Check today's expiring" (the token only allows check-in endpoints, so expiring must be viewed in the browser)
+- **Monthly uptime report**: a "This month's uptime" panel in the data center ranks services by monthly uptime (lowest first, from probe records); the lowest 3 are pushed with the monthly report on the 1st
+
 ### Backup & security
 - **Backup / restore**: one-click backup download (login password hash, Telegram token, API token, TOTP secret, sync token, and auto-sign-in headers are stripped automatically); restoring auto-saves the current data first (keeps the last 5)
 - **Export ledger**: generates a `服务台账.md` (service ledger) for easy reading

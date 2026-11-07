@@ -1192,3 +1192,10 @@ input:focus, textarea:focus, select:focus { outline: none; border-color: color-m
 
 /* ---------- v23 通知设置面板：锚点不被吸顶栏挡住 ---------- */
 #sec-notify { scroll-margin-top: 18px; }
+
+/* ---------- v65 共享账号库 / 智能分类推荐 ---------- */
+.vault-pick-row { display: flex; gap: 8px; margin-bottom: 10px; }
+.vault-pick-row select { flex: 1; min-width: 0; }
+#vault-form { margin-bottom: 12px; }
+#cat-suggest { margin: 2px 0; }
+#cat-suggest .muted { font-size: 13px; }
