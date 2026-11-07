@@ -55,6 +55,31 @@ body[data-theme="emerald"] {
   --sel: rgba(52, 211, 153, .35);
   --glow: rgba(52, 211, 153, .12);
 }
+body[data-theme="day"] {
+  --bg: #eef1f7;
+  --panel: rgba(255,255,255,.75);
+  --card: rgba(255,255,255,.9);
+  --border: rgba(15,23,42,.12);
+  --border-2: rgba(15,23,42,.24);
+  --text: #1e293b;
+  --muted: #64748b;
+  --accent: #7c3aed;
+  --accent-2: #0891b2;
+  --magenta: #db2777;
+  --g1: #7c3aed; --g2: #db2777; --g3: #0891b2;
+  --blob1: rgba(124,58,237,.16); --blob2: rgba(8,145,178,.12); --blob3: rgba(219,39,119,.10);
+  --grid: rgba(15,23,42,.04);
+  --thumb: #cbd5e1; --thumb2: #94a3b8;
+  --sel: rgba(124,58,237,.25);
+  --glow: rgba(124,58,237,.08);
+}
+/* 日间主题：几处硬编码白色文字改成深色，否则在浅底上看不见 */
+body[data-theme="day"] .brand-txt { background: linear-gradient(120deg, var(--text) 30%, color-mix(in srgb, var(--g2) 45%, var(--text)) 85%); }
+body[data-theme="day"] .big-title { background: linear-gradient(115deg, var(--text) 12%, var(--g2) 38%, var(--g3) 60%, var(--g2) 82%, var(--text) 100%); }
+body[data-theme="day"] .landing-brand, body[data-theme="day"] .landing-float b { background: linear-gradient(90deg, var(--text), var(--accent-2)); }
+body[data-theme="day"] .c-title a:hover { color: var(--accent); }
+body[data-theme="day"] .chip { color: var(--accent); }
+body[data-theme="day"] .theme-dot.on { border-color: rgba(15,23,42,.6); box-shadow: 0 0 14px rgba(124,58,237,.3); }
 
 :root {
   --good: #34d399;
@@ -184,6 +209,7 @@ a:hover { text-decoration: underline; }
 .theme-dot.d-neon { background: linear-gradient(135deg, #d946ef, #22d3ee); }
 .theme-dot.d-ocean { background: linear-gradient(135deg, #2563eb, #22d3ee); }
 .theme-dot.d-emerald { background: linear-gradient(135deg, #059669, #a3e635); }
+.theme-dot.d-day { background: linear-gradient(135deg, #f8fafc, #cbd5e1); }
 .theme-dot:hover { transform: scale(1.2); }
 .theme-dot.on { border-color: rgba(255, 255, 255, .85); box-shadow: 0 0 14px rgba(255, 255, 255, .3); }
 
@@ -560,7 +586,10 @@ a:hover { text-decoration: underline; }
 .b-fire { background: rgba(251, 146, 60, .11); color: #fb923c; box-shadow: 0 0 12px rgba(251, 146, 60, .18); }
 .b-visit { background: color-mix(in srgb, var(--accent-2) 12%, transparent); color: var(--accent-2); }
 
-.c-title { font-size: 19px; font-weight: 800; letter-spacing: .3px; }
+.c-title { font-size: 19px; font-weight: 800; letter-spacing: .3px; display: flex; align-items: center; gap: 8px; }
+/* 网站真实图标：卡片标题旁 20px，落地页 18px；加载失败时 img 自删、回落到分类 emoji */
+.site-fav { width: 20px; height: 20px; border-radius: 5px; flex-shrink: 0; background: var(--panel); }
+.landing-site .site-fav { width: 18px; height: 18px; border-radius: 4px; display: inline-block; vertical-align: -3px; margin-right: 6px; }
 .c-title a { color: var(--text); transition: color .12s, text-shadow .12s; }
 .c-title a:hover { color: #fff; text-decoration: none; text-shadow: 0 0 18px color-mix(in srgb, var(--g2) 50%, transparent); }
 .arrow { color: var(--accent-2); font-size: 14px; margin-left: 2px; }
@@ -848,6 +877,24 @@ body.mode-preview { background: radial-gradient(900px 500px at 78% -80px, rgba(2
 .exp-badge.overdue { background: rgba(239,68,68,.16); color: #f87171; }
 .exp-badge.soon { background: rgba(251,191,36,.16); color: #fbbf24; }
 .exp-badge.later { background: rgba(255,255,255,.06); color: var(--muted); }
+/* 到期日历：7 列月视图，有到期的日子标个数，点一下看当天到期列表 */
+#expiry-calendar { margin-top: 16px; }
+.cal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.cal-head b { font-size: 15px; }
+.cal-week, .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+.cal-week span { text-align: center; font-size: 12px; color: var(--muted); padding: 2px 0; }
+.cal-day { min-height: 44px; padding: 4px 2px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel); color: var(--text); cursor: pointer; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; font-size: 13px; font-family: inherit; }
+.cal-day b { font-weight: 700; }
+.cal-day i { font-style: normal; font-size: 10px; color: var(--accent); font-weight: 700; }
+.cal-day.empty { visibility: hidden; }
+.cal-day.today { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.cal-day.has-exp { background: color-mix(in srgb, var(--accent) 12%, var(--panel)); }
+.cal-day.selected { background: var(--accent); color: #fff; }
+.cal-day.selected i { color: #fff; }
+.cal-day.past { opacity: .55; }
+.cal-day:disabled { cursor: default; opacity: .6; }
+.cal-day-list { margin-top: 10px; font-size: 13px; line-height: 1.7; color: var(--muted); }
+.cal-day-list b { color: var(--text); }
 
 /* 登录验证码行 */
 .captcha-row { display: flex; gap: 10px; align-items: center; margin-top: 6px; }

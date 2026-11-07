@@ -1158,6 +1158,38 @@ async function handleAPI(req, res, pathname) {
     return send(200, { ...svc, xpGained: 10, unlocked });
   }
 
+  /* CSV 批量导入：一次导入多个服务（最多 500 行）；只新增、不覆盖、不加 XP */
+  if (pathname === '/api/services/import' && req.method === 'POST') {
+    const body = await jsonBody(req);
+    const rows = Array.isArray(body.services) ? body.services : [];
+    if (!rows.length) return send(400, { error: '没有可导入的服务' });
+    if (rows.length > 500) return send(400, { error: '一次最多导入 500 个' });
+    const data = loadData();
+    const catIds = categoriesOf(data).map((c) => c.id);
+    let maxOrder = data.services.reduce((m, s) => Math.max(m, s.sortOrder ?? 0), 0);
+    let imported = 0;
+    for (const r of rows) {
+      const f = pickFields(r || {}, null, catIds);
+      if (!f.name) continue;
+      const svc = Object.assign({
+        id: crypto.randomBytes(12).toString('hex'),
+        category: 'relay',
+        url: '', account: '', secret: '', price: '', notes: '',
+        registeredAt: todayStr(), expiresAt: '',
+        checkinFrequency: 'none', checkinEveryDays: 1, renewDays: 365, checkins: [],
+        visits: 0,
+        sortOrder: ++maxOrder
+      }, f);
+      data.services.push(svc);
+      imported++;
+    }
+    if (imported) {
+      syncAchievements(data);
+      writeJSON(DATA_FILE, data);
+    }
+    return send(200, { ok: true, imported, skipped: rows.length - imported });
+  }
+
   /* 卡片拖拽排序持久化 */
   if (pathname === '/api/reorder' && req.method === 'POST') {
     const body = await jsonBody(req);

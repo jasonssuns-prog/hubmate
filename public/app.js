@@ -76,6 +76,14 @@ function autoFillExpires() {
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
+/* 网站真实图标：Google favicon 服务按域名取，加载失败自动隐藏、回落到分类 emoji */
+function favIcon(s) {
+  if (!s.url) return '';
+  let host = '';
+  try { host = new URL(s.url).hostname; } catch { return ''; }
+  if (!host) return '';
+  return `<img class="site-fav" src="https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=64" alt="" loading="lazy" onerror="this.remove()">`;
+}
 function daysUntil(dateStr) {
   if (!dateStr) return null;
   const [y, m, d] = dateStr.split('-').map(Number);
@@ -115,6 +123,15 @@ function dueToday(s, t) {
 /* 今日签到 cohort：今天到期 + 今天已签；不到期的服务不计入今日 */
 function todayCohort(s, t) {
   return dueToday(s, t) || (s.checkins || []).includes(t);
+}
+/* 下次签到（只给间隔 > 1 天的服务显示）：没签过就是今天；否则上次签到 + 间隔天数；算出来已过期的也算今天 */
+function nextCheckinLabel(s, t) {
+  if (s.checkinFrequency !== 'daily' || s.category === 'idle' || everyDays(s) <= 1) return '';
+  const c = (s.checkins || []).filter(Boolean).sort();
+  if (!c.length) return '今天';
+  const next = addDaysStr(c[c.length - 1], everyDays(s));
+  if (!next || next <= t) return '今天';
+  return next.slice(5); // MM-DD
 }
 function streak(dates) {
   const set = new Set(dates || []);
@@ -468,11 +485,13 @@ function cardHTML(s, idx) {
   }
   const bold = cardBold(s);
   const noteLines = (s.notes || '').split(/\r?\n/).slice(1).filter(Boolean);
+  const nextCk = nextCheckinLabel(s, todayStr());
   const metaLine = [
     s.registeredAt ? `注册 ${esc(s.registeredAt)}` : '',
     s.expiresAt ? `到期 ${esc(s.expiresAt)}` : '',
     s.price ? esc(s.price) : '',
-    s.hasAccount ? '账号已录 🔒' : ''
+    s.hasAccount ? '账号已录 🔒' : '',
+    nextCk ? `下次签到 ${nextCk}` : ''
   ].filter(Boolean).join(' · ') || (live() ? '补个账号备注吧' : '登录后可补全信息');
 
   const actions = live()
@@ -498,7 +517,7 @@ function cardHTML(s, idx) {
       <span class="cat-pill ${cat.cls}"><i></i>${cat.icon} ${cat.label}</span>
       <span class="c-badges">${isFav(s) ? '<span class="badge b-fav">★ 收藏</span>' : ''}${s.abnormal ? '<span class="badge b-bad">⚠️ 异常</span>' : ''}${s.visits ? `<span class="badge b-visit" title="累计访问 ${s.visits} 次">👆 ${s.visits}</span>` : ''}${exp}${s.linkStatus === 'dead' ? '<span class="badge b-bad" title="最近一次检测打不开">⚠️ 疑似失效</span>' : ''}${st ? `<span class="badge b-fire">🔥 连${st}天</span>` : ''}${checkedToday ? '<span class="badge b-ok">今日已签</span>' : ''}</span>
     </div>
-    <div class="c-title">${s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener" data-visit="${s.id}">${esc(s.name)} <span class="arrow">↗</span></a>` : esc(s.name)}</div>
+    <div class="c-title">${favIcon(s)}${s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener" data-visit="${s.id}">${esc(s.name)} <span class="arrow">↗</span></a>` : esc(s.name)}</div>
     <div class="c-desc">${esc(bold)}</div>
     <div class="c-div"></div>
     <div class="c-note">${metaLine}</div>
@@ -561,7 +580,7 @@ function favGroups(favs) {
 }
 function landingSiteCard(s, star) {
   const host = (() => { try { return new URL(s.url).hostname; } catch { return s.url || ''; } })();
-  return `<a class="landing-site" href="${esc(s.url || '#')}" target="_blank" rel="noopener"><b>${star ? '★ ' : ''}${esc(s.name)}</b><i>${esc(host)}</i><span>${CATS[s.category]?.label || s.category}</span><span class="go">直达 ↗</span></a>`;
+  return `<a class="landing-site" href="${esc(s.url || '#')}" target="_blank" rel="noopener">${favIcon(s)}<b>${star ? '★ ' : ''}${esc(s.name)}</b><i>${esc(host)}</i><span>${CATS[s.category]?.label || s.category}</span><span class="go">直达 ↗</span></a>`;
 }
 
 /* ---------- 登录前落地页：只渲染今日签到 + 我的网站 ---------- */
@@ -622,7 +641,7 @@ function renderLanding() {
     grid.innerHTML = shown.length
       ? `<div class="landing-sites">${shown.map((s) => {
           const host = (() => { try { return new URL(s.url).hostname; } catch { return s.url || ''; } })();
-          return `<a class="landing-site" href="${esc(s.url || '#')}" target="_blank" rel="noopener"><b>${isFav(s) ? '★ ' : ''}${esc(s.name)}</b><i>${esc(host)}</i><span>${CATS[s.category]?.label || s.category}</span><span class="go">直达 ↗</span></a>`;
+          return `<a class="landing-site" href="${esc(s.url || '#')}" target="_blank" rel="noopener">${favIcon(s)}<b>${isFav(s) ? '★ ' : ''}${esc(s.name)}</b><i>${esc(host)}</i><span>${CATS[s.category]?.label || s.category}</span><span class="go">直达 ↗</span></a>`;
         }).join('')}</div>`
       : (kw ? '<div class="empty">没有匹配的网站，换个关键词试试。</div>' : '<div class="empty">还没有收录网站，登录后添加。</div>');
   }
@@ -682,6 +701,52 @@ function renderExpiring() {
         return `<div class="landing-checkin-item"><span class="ck">⏰</span><span class="ck-name">${s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.name)}</a>` : esc(s.name)}</span><span class="ck-note">${esc(CATS[s.category]?.label || s.category)} · 到期 ${esc(s.expiresAt)}${host ? ` · ${esc(host)}` : ''}</span>${badge}<button class="btn small ghost" data-act="renew" data-id="${s.id}">${renewLabel(s)}</button><button class="btn small ghost" data-act="edit" data-id="${s.id}">编辑</button>${(s.prevRenew || s.prevExpiresAt) ? `<button class="btn small ghost" data-act="undo-renew" data-id="${s.id}">↩ 撤回续期</button>` : ''}</div>`;
       }).join('')
     : '<div class="empty">太好了，30 天内没有要到期的服务。</div>';
+  renderCalendar();
+}
+
+/* ---------- 到期日历：按月看哪天有服务到期 ---------- */
+let calYear = null, calMonth = null; // 0-based month；null = 本月
+let calSelected = ''; // 选中的日期 YYYY-MM-DD
+function renderCalendar() {
+  const box = $('#expiry-calendar');
+  if (!box) return;
+  if (calYear === null) {
+    const t = todayStr().split('-').map(Number);
+    calYear = t[0]; calMonth = t[1] - 1; calSelected = todayStr();
+  }
+  const byDate = {};
+  for (const s of services) {
+    if (!s.expiresAt) continue;
+    (byDate[s.expiresAt] = byDate[s.expiresAt] || []).push(s);
+  }
+  const startWeekday = new Date(calYear, calMonth, 1).getDay();
+  const daysInMonth = new Date(calYear, calMonth + 1, 0).getDate();
+  const today = todayStr();
+  let cells = '';
+  for (let i = 0; i < startWeekday; i++) cells += '<span class="cal-day empty"></span>';
+  for (let d = 1; d <= daysInMonth; d++) {
+    const ymd = `${calYear}-${String(calMonth + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    const list = byDate[ymd] || [];
+    const cls = ['cal-day'];
+    if (ymd === today) cls.push('today');
+    if (list.length) cls.push('has-exp');
+    if (ymd === calSelected) cls.push('selected');
+    if (ymd < today) cls.push('past');
+    cells += `<button class="${cls.join(' ')}" data-cal-day="${ymd}" ${list.length ? '' : 'disabled'}><b>${d}</b>${list.length ? `<i>${list.length}个</i>` : ''}</button>`;
+  }
+  box.innerHTML = `<div class="cal-head"><button class="btn small ghost" id="cal-prev">‹</button><b>${calYear}年${calMonth + 1}月</b><button class="btn small ghost" id="cal-next">›</button></div><div class="cal-week"><span>日</span><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span></div><div class="cal-grid">${cells}</div>`;
+  $('#cal-prev').addEventListener('click', () => { calMonth--; if (calMonth < 0) { calMonth = 11; calYear--; } renderCalendar(); });
+  $('#cal-next').addEventListener('click', () => { calMonth++; if (calMonth > 11) { calMonth = 0; calYear++; } renderCalendar(); });
+  box.querySelectorAll('[data-cal-day]').forEach((b) => b.addEventListener('click', () => { calSelected = b.dataset.calDay; renderCalendar(); renderCalDayList(); }));
+  renderCalDayList();
+}
+function renderCalDayList() {
+  const box = $('#cal-day-list');
+  if (!box) return;
+  const list = services.filter((s) => s.expiresAt === calSelected);
+  if (!list.length) { box.innerHTML = ''; return; }
+  const [, m, d] = calSelected.split('-');
+  box.innerHTML = `<div class="cal-day-list"><b>${+m}月${+d}日到期（${list.length}个）：</b>${list.map((s) => s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.name)}</a>` : esc(s.name)).join('、')}</div>`;
 }
 
 /* ---------- Telegram 通知设置 ---------- */
@@ -1053,6 +1118,141 @@ $('#restore-file').addEventListener('change', async (e) => {
   } catch (err) { handleAuthErr(err); }
 });
 
+/* ---------- CSV 批量导入 / 导出 ---------- */
+/* CSV 解析：支持引号字段、字段内逗号/换行、"" 转义 */
+function parseCSV(text) {
+  const rows = [];
+  let row = [], cur = '', inQ = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inQ) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') { cur += '"'; i++; }
+        else inQ = false;
+      } else cur += ch;
+    } else if (ch === '"') inQ = true;
+    else if (ch === ',') { row.push(cur); cur = ''; }
+    else if (ch === '\n' || ch === '\r') {
+      if (ch === '\r' && text[i + 1] === '\n') i++;
+      row.push(cur); cur = '';
+      rows.push(row); row = [];
+    } else cur += ch;
+  }
+  if (cur !== '' || row.length) { row.push(cur); rows.push(row); }
+  return rows.filter((r) => r.some((c) => String(c).trim() !== ''));
+}
+function csvEscape(v) {
+  const s = String(v ?? '');
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+const CSV_COLS = ['name', 'url', 'category', 'account', 'secret', 'price', 'registeredAt', 'expiresAt', 'checkinFrequency', 'checkinEveryDays', 'renewDays', 'favorite', 'abnormal', 'notes'];
+function servicesToCSV() {
+  const lines = [CSV_COLS.join(',')];
+  for (const s of services) {
+    lines.push(CSV_COLS.map((c) => csvEscape(c === 'favorite' || c === 'abnormal' ? (s[c] ? 'true' : 'false') : (s[c] ?? ''))).join(','));
+  }
+  return '\uFEFF' + lines.join('\r\n'); // BOM：Excel 打开不乱码
+}
+/* CSV 表头 → 字段：中英文都认 */
+const CSV_HEADERS = {
+  name: ['name', '名称', '服务名', '服务'],
+  url: ['url', '网址', '地址', '链接'],
+  category: ['category', '分类'],
+  account: ['account', '账号', '用户名'],
+  secret: ['secret', '密码', '密钥'],
+  price: ['price', '价格'],
+  registeredAt: ['registeredat', '注册日期', '注册/购买日期', '开始时间', '注册'],
+  expiresAt: ['expiresat', '到期日', '到期', '结束时间'],
+  checkinFrequency: ['checkinfrequency', '签到频率', '频率'],
+  checkinEveryDays: ['checkineverydays', '签到间隔', '间隔'],
+  renewDays: ['renewdays', '续期周期', '周期'],
+  favorite: ['favorite', '收藏'],
+  abnormal: ['abnormal', '异常'],
+  notes: ['notes', '备注', 'note']
+};
+function normHeader(h) { return String(h || '').trim().toLowerCase().replace(/[\s_/]/g, ''); }
+function mapCSVRows(rows) {
+  const header = rows[0].map(normHeader);
+  const idx = {};
+  for (const [field, names] of Object.entries(CSV_HEADERS)) {
+    for (const n of names) {
+      const i = header.indexOf(normHeader(n));
+      if (i >= 0) { idx[field] = i; break; }
+    }
+  }
+  const list = [];
+  let skipped = 0;
+  for (let r = 1; r < rows.length; r++) {
+    const row = rows[r];
+    const get = (f) => (idx[f] === undefined ? '' : String(row[idx[f]] ?? '').trim());
+    const name = get('name');
+    if (!name) { skipped++; continue; }
+    const catVal = get('category');
+    let category = 'relay';
+    if (catVal) {
+      if (CATS[catVal]) category = catVal;
+      else {
+        const hit = Object.entries(CATS).find(([, c]) => c.label === catVal);
+        if (hit) category = hit[0];
+      }
+    }
+    const normDate = (v) => {
+      const m = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/.exec(v);
+      return m ? `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}` : '';
+    };
+    const boolVal = (v) => ['true', '1', '是', 'yes', 'y', '★'].includes(v.toLowerCase());
+    const freq = get('checkinFrequency');
+    list.push({
+      name: name.slice(0, 100),
+      url: get('url').slice(0, 500),
+      category,
+      account: get('account').slice(0, 500),
+      secret: get('secret').slice(0, 500),
+      price: get('price').slice(0, 500),
+      registeredAt: normDate(get('registeredAt')),
+      expiresAt: normDate(get('expiresAt')),
+      checkinFrequency: (freq === 'daily' || freq === '每天') ? 'daily' : 'none',
+      checkinEveryDays: Math.min(365, Math.max(1, parseInt(get('checkinEveryDays'), 10) || 1)),
+      renewDays: Math.min(3650, Math.max(1, parseInt(get('renewDays'), 10) || 365)),
+      favorite: boolVal(get('favorite')),
+      abnormal: boolVal(get('abnormal')),
+      notes: get('notes').slice(0, 500)
+    });
+  }
+  return { list, skipped };
+}
+$('#btn-csv-export').addEventListener('click', () => {
+  const blob = new Blob([servicesToCSV()], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `hubmate-services-${todayStr()}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  toast(`已导出 ${services.length} 个服务为 CSV`);
+});
+$('#btn-csv-import').addEventListener('click', () => $('#csv-file').click());
+$('#csv-file').addEventListener('change', async (e) => {
+  const f = e.target.files[0];
+  e.target.value = '';
+  if (!f) return;
+  let text;
+  try { text = await f.text(); } catch { toast('读不到这个文件', 'bad'); return; }
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1); // 去掉 BOM
+  const rows = parseCSV(text);
+  if (!rows.length) { toast('这个 CSV 是空的', 'bad'); return; }
+  const { list, skipped } = mapCSVRows(rows);
+  if (!list.length) { toast('这个 CSV 里没有能导入的服务（名称必填）', 'bad'); return; }
+  const preview = list.slice(0, 5).map((s) => s.name).join('、');
+  if (!confirm(`CSV 里共 ${rows.length - 1} 行数据，其中 ${list.length} 个有效${skipped ? `、${skipped} 个跳过（名称为空）` : ''}。\n前几个：${preview}${list.length > 5 ? '…' : ''}\n确定导入这 ${list.length} 个服务吗？只新增，不覆盖现有服务。`)) return;
+  try {
+    const r = await api('/api/services/import', { method: 'POST', body: JSON.stringify({ services: list }) });
+    toast(`已导入 ${r.imported} 个服务${r.skipped ? `，跳过 ${r.skipped} 个` : ''}`);
+    await loadAll();
+  } catch (err) { handleAuthErr(err); }
+});
+
 /* ---------- 批量操作：勾选卡片，一次改分类或删除 ---------- */
 let bulkMode = false;
 const bulkSel = new Set();
@@ -1251,7 +1451,8 @@ const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 const THEMES = {
   neon: { particles: ['232,121,249', '34,211,238', '167,139,250'] },
   ocean: { particles: ['56,189,248', '34,211,238', '96,165,250'] },
-  emerald: { particles: ['52,211,153', '163,230,53', '45,212,191'] }
+  emerald: { particles: ['52,211,153', '163,230,53', '45,212,191'] },
+  day: { particles: ['124,58,237', '8,145,178', '219,39,119'] }
 };
 let particleColors = THEMES.neon.particles;
 function applyTheme(name, save) {
@@ -1266,6 +1467,10 @@ function applyTheme(name, save) {
   const stops = document.querySelectorAll('#ringGrad stop');
   if (stops[0] && g2) stops[0].setAttribute('stop-color', g2);
   if (stops[1] && g3) stops[1].setAttribute('stop-color', g3);
+  /* 手机浏览器顶栏颜色跟主题走 */
+  const themeColor = { neon: '#08040f', ocean: '#020a16', emerald: '#02120c', day: '#eef1f7' }[name];
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta && themeColor) meta.setAttribute('content', themeColor);
   drawTrend();
 }
 document.querySelectorAll('.theme-dot').forEach((d) =>

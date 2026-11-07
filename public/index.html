@@ -11,7 +11,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="apple-touch-icon" href="/icon-180.png">
-<link rel="stylesheet" href="/style.css?v=20261101-53">
+<link rel="stylesheet" href="/style.css?v=20261107-54">
 </head>
 <body class="mode-preview" data-theme="neon">
 
@@ -106,6 +106,7 @@
         <button class="theme-dot d-neon on" data-theme="neon" title="霓虹紫"></button>
         <button class="theme-dot d-ocean" data-theme="ocean" title="深海蓝"></button>
         <button class="theme-dot d-emerald" data-theme="emerald" title="翡翠绿"></button>
+        <button class="theme-dot d-day" data-theme="day" title="日间浅色"></button>
       </div>
       <div class="user-card">
         <div class="avatar" id="avatar">·</div>
@@ -120,6 +121,9 @@
         <button id="btn-backup" class="btn ghost small live-only" title="下载完整数据备份（已去掉密码哈希和机器人 Token）">💾 备份</button>
         <button id="btn-restore" class="btn ghost small live-only" title="从备份文件恢复（会先自动备份当前数据）">⬆️ 恢复</button>
         <input type="file" id="restore-file" accept=".json,application/json" class="hidden">
+        <button id="btn-csv-export" class="btn ghost small live-only" title="把全部服务导出为 CSV 表格">📊 CSV 导出</button>
+        <button id="btn-csv-import" class="btn ghost small live-only" title="从 CSV 表格批量导入服务">📥 CSV 导入</button>
+        <input type="file" id="csv-file" accept=".csv,text/csv" class="hidden">
         <button id="btn-linkcheck" class="btn ghost small live-only" title="逐个探活，疑似失效的标在卡片上">🔗 检测链接</button>
         <button id="btn-pass" class="btn ghost small live-only">🔑 改密码</button>
         <button id="btn-logout" class="btn ghost small live-only">🚪 退出</button>
@@ -202,6 +206,8 @@
       </div>
       <div class="help-fold"><button class="help-toggle" type="button">📖 说明 ▾</button><div class="help-body"><p class="muted">30 天内到期（含已过期）的服务，按最紧急的排在最前。点名称直达官网去办理，办完后点“编辑”更新到期时间。</p></div></div>
       <div id="expiring-list"></div>
+      <div id="expiry-calendar"></div>
+      <div id="cal-day-list"></div>
     </section>
 
     <section class="panel live-only" id="sec-notify">
@@ -413,6 +419,6 @@
 </div>
 
 <div id="toast"></div>
-<script src="/app.js?v=20261101-53"></script>
+<script src="/app.js?v=20261107-54"></script>
 </body>
 </html>
