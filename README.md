@@ -113,8 +113,12 @@ Windows 也可以双击 `start.bat`（关掉黑窗口 = 停止服务）。默认
 
 默认账号 `jason` / 密码 `jason123` —— **登录后请点右上角「改密码」换掉**。
 
-### 部署到服务器
-看 [`DEPLOY.md`](./DEPLOY.md)：一条 `bash deploy/install.sh` 搞定（systemd 常驻 + 可选 nginx 反代 + HTTPS）。
+### 部署到服务器（2 分钟）
+```bash
+git clone https://github.com/jasonssuns-prog/hubmate.git /opt/service-hub
+cd /opt/service-hub && sudo bash deploy/install.sh
+```
+脚本自己装 Node.js、建低权限用户、配 systemd 开机自启、做健康检查。装完打开 `http://服务器IP:7788`，默认账号 `jason` / `jason123`，登录后第一件事改密码。更多选项（nginx 反代、HTTPS、换端口）看 [`DEPLOY.md`](./DEPLOY.md)。
 
 ### 自定义域名（Cloudflare）
 `cloudflare-worker/` 里有一个反代 Worker：把你自己的域名绑定到这个 Worker，它会把访问转发到你部署好的服务，地址栏全程保持你的域名。详见 [`cloudflare-worker/README.md`](./cloudflare-worker/README.md)。
@@ -129,6 +133,15 @@ Windows 也可以双击 `start.bat`（关掉黑窗口 = 停止服务）。默认
 4. 点“自动获取 Chat ID”，再点“发送测试”，收到测试消息就通了。
 
 Token 只存在服务端的 `data.json`，不会出现在前端和备份文件里。**不要把 Token 发到聊天群或贴到公开地方**，泄露了要在 @BotFather 重新生成。
+
+## ☁️ GitHub 自动备份设置
+
+1. 在 GitHub 新建一个**私有**仓库（比如 `hubmate-data`），空仓库就行，不用勾 README / .gitignore / license。
+2. GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic) → Generate new token (classic)，Note 随便写（比如 `hubmate-backup`），Expiration 选 No expiration，勾选 `repo` 权限，生成后**只显示一次**，复制好。
+3. 登录服务台 → 侧栏“☁️ GitHub 备份”，填入 Token、仓库（`你的用户名/仓库名`，比如 `jasonssuns-prog/hubmate-data`）、分支（默认 `main`），点保存，再点“立即备份”。
+4. 配好后每天自动备份一次（数据没变就不推）；备份文件是仓库里的 `hubmate-backup.json`，Git 历史就是备份历史。
+
+备份前会自动去掉登录密码哈希、Telegram Token、API 令牌、二次验证密钥、同步口令和自动签到的请求头。Token 泄露了在 GitHub 上删掉重建一个，再到面板里更新。
 
 ## 💾 数据
 

@@ -8,6 +8,15 @@
 
 ## 1. 上传
 
+**推荐：直接在服务器上拉代码（最快）：**
+
+```bash
+ssh root@服务器IP
+git clone https://github.com/jasonssuns-prog/hubmate.git /opt/service-hub
+```
+
+没有 git 或想从本机传包时，用 tar/scp：
+
 在 Windows 本机（Git Bash / 终端）执行：
 
 ```bash

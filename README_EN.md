@@ -113,8 +113,12 @@ On Windows you can double-click `start.bat` (closing the black window stops the 
 
 Default login is `jason` / `jason123` — **change the password after logging in** (top-right "change password").
 
-### Deploy to a server
-See [`DEPLOY.md`](./DEPLOY.md): one `bash deploy/install.sh` sets it up (systemd service + optional nginx reverse proxy + HTTPS).
+### Deploy to a server (2 minutes)
+```bash
+git clone https://github.com/jasonssuns-prog/hubmate.git /opt/service-hub
+cd /opt/service-hub && sudo bash deploy/install.sh
+```
+The script installs Node.js, creates a low-privilege user, sets up systemd autostart, and runs a health check. Then open `http://YOUR_SERVER_IP:7788` — default login is `jason` / `jason123`, change the password right after logging in. For more options (nginx reverse proxy, HTTPS, custom port), see [`DEPLOY.md`](./DEPLOY.md).
 
 ### Custom domain (Cloudflare)
 `cloudflare-worker/` contains a reverse-proxy Worker: bind your own domain to it and it forwards visits to your deployed instance, keeping your domain in the address bar. See [`cloudflare-worker/README.md`](./cloudflare-worker/README.md).
@@ -129,6 +133,15 @@ See [`DEPLOY.md`](./DEPLOY.md): one `bash deploy/install.sh` sets it up (systemd
 4. Click "auto-fetch Chat ID", then "send test" — if the test message arrives, you're set.
 
 The token is stored only in the server's `data.json` and never appears in the frontend or in backup files. **Never post the token in a group chat or anywhere public** — if it leaks, regenerate it via @BotFather.
+
+## ☁️ GitHub auto-backup setup
+
+1. Create a **private** repo on GitHub (e.g. `hubmate-data`) — empty is fine, no README / .gitignore / license needed.
+2. GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic) → Generate new token (classic). Give it a note (e.g. `hubmate-backup`), set Expiration to No expiration, check the `repo` scope, and copy the token — **it is shown only once**.
+3. Log in to the hub → sidebar "☁️ GitHub backup", fill in the token, the repo (`your-username/repo-name`, e.g. `jasonssuns-prog/hubmate-data`), and the branch (default `main`), then save and hit "Back up now".
+4. Once configured, it backs up daily (skipped when the data is unchanged); the backup file is `hubmate-backup.json` in the repo, and the Git history is the backup history.
+
+The login password hash, Telegram token, API token, TOTP secret, sync token, and auto-sign-in headers are stripped before pushing. If the token leaks, delete it on GitHub, create a new one, and update it in the panel.
 
 ## 💾 Data
 
