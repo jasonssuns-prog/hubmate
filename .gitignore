@@ -1,0 +1,4 @@
+# 本地开发状态（wrangler dev 的本地 D1 / 缓存），不要提交
+.wrangler/
+# 本地装的开发工具（wrangler 只是开发工具，不是运行时依赖）
+node_modules/

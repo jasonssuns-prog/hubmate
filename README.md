@@ -5,6 +5,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/jasonssuns-prog/hubmate)](https://github.com/jasonssuns-prog/hubmate/stargazers)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D18-brightgreen)](https://nodejs.org/)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/jasonssuns-prog/hubmate/tree/dev)
 
 **记录你注册过的一切**——签到站、中转站、VPS、游戏、订阅——每天打开签个到、看看到期，**一个页面管全部**。
 
@@ -133,7 +134,36 @@ cd /opt/service-hub && sudo bash deploy/install.sh
 ### 自定义域名（Cloudflare）
 `cloudflare-worker/` 里有一个反代 Worker：把你自己的域名绑定到这个 Worker，它会把访问转发到你部署好的服务，地址栏全程保持你的域名。详见 [`cloudflare-worker/README.md`](./cloudflare-worker/README.md)。
 
-> **Cloudflare Workers 一键部署？** 目前不支持：本项目是 Node.js 服务端（监听端口 + 本地文件存数据），Workers 是无服务器运行时，没有持久文件系统和 TCP 监听，所以 [Deploy to Cloudflare](https://developers.cloudflare.com/workers/platform/deploy-buttons/) 按钮无法直接部署它。想把它做成 Workers 原生版（KV / D1 存数据）是另一个大工程，有兴趣可以提 Issue 讨论。
+> **想直接跑在 Cloudflare 上、不用自己准备服务器？** 看下面一节“Workers 原生版”：dev 分支是 Workers 原生版（D1 存数据），支持上面那个 Deploy to Cloudflare 一键部署按钮。
+
+## ☁️ Workers 原生版（一键部署到 Cloudflare）
+
+> **这是 dev 分支的版本**：服务端重写成了 Cloudflare Workers 原生版，数据存在 **D1**（SQLite）里，静态页面走 Workers Static Assets，定时任务（Telegram 提醒、死链检测、GitHub 备份、机器人回话）走 Cron Triggers。前端页面和 Node 版基本一样，功能也一样，只有一个例外：**多服务器同步（v61）没有了**——Workers 是全球一份部署，不需要同步。Node 版（main 分支）继续保留，两个版本数据不互通。
+
+### 一键部署
+点上面那个 **Deploy to Cloudflare** 按钮，按提示登录 Cloudflare、选账号，剩下的自动完成：D1 数据库自动创建并绑定，建表 migration 自动跑，Worker 自动上线。部署完打开给你的 `*.workers.dev` 地址就能用。
+
+### 手动部署
+```bash
+npx wrangler login
+npx wrangler deploy
+npx wrangler d1 migrations apply DB --remote   # 建表（Worker 首次收到请求时也会自动建表）
+```
+
+### 从 Node 版迁移数据过来
+```bash
+# 1. 把 Node 版的数据文件拷出来（线上那台的 /opt/service-hub/data/data.json，或一份完整备份）
+#    注意：不要用页面上“备份”下载的文件——它已经去掉了密码和 Token。
+# 2. 生成导入用的 SQL
+node tools/migrate-to-d1.mjs /path/to/data.json > migration-data.sql
+# 3. 先在本地 D1 试，再导到线上
+npx wrangler d1 execute hubmate --local  --file=migration-data.sql
+npx wrangler d1 execute hubmate --remote --file=migration-data.sql
+```
+⚠️ **迁移后登录密码会重置为默认 `jason123`**：Node 版密码是 scrypt 哈希，Workers 免费套餐每请求只有 10ms CPU，同步验 scrypt 会直接报 Error 1102，所以迁移脚本不搬旧密码，改成 PBKDF2 存的默认密码。迁移完第一次登录用 `jason` / `jason123`，登录后立即点右上角「改密码」换掉。Telegram Token、API 令牌、二次验证密钥会一起迁过来，不用重配。
+
+### 免费套餐够用吗
+够用（个人用）：D1 每天 500 万次读、10 万次写；Worker 每天 10 万次请求；静态资源不限量。两个上限要注意：每请求最多 50 条 D1 查询、10ms CPU——本项目写回数据时用多行 INSERT 合并成少数几条语句、密码走异步 Web Crypto，就是为了不超这两个上限。定时任务每分钟跑一次 TG 轮询，如果你的账号限制每分钟触发，把 `wrangler.toml` 里第一条 cron 改成 `*/5 * * * *`。
 
 ## 🔔 Telegram 设置
 

@@ -11,7 +11,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="apple-touch-icon" href="/icon-180.png">
-<link rel="stylesheet" href="/style.css?v=20261107-62">
+<link rel="stylesheet" href="/style.css?v=20261108-w1">
 </head>
 <body class="mode-preview" data-theme="neon">
 
@@ -105,7 +105,6 @@
       <a href="#sec-apitoken" class="nav-item live-only"><i>🔑</i>API 令牌</a>
       <a href="#sec-totp" class="nav-item live-only"><i>🔐</i>二次验证</a>
       <a href="#sec-github" class="nav-item live-only"><i>☁️</i>GitHub 备份</a>
-      <a href="#sec-sync" class="nav-item live-only"><i>🔄</i>多服务器同步</a>
       <a href="#sec-dupes" class="nav-item live-only"><i>♻️</i>重复清理</a>
       <a href="#sec-pwreuse" class="nav-item live-only"><i>🔐</i>密码复用 <span class="nav-badge" id="pwreuse-nav-count"></span></a>
       <a href="#sec-cats" class="nav-item live-only"><i>🏷️</i>分类管理</a>
@@ -324,25 +323,6 @@
         <button id="btn-gh-run" class="btn ghost">立即备份</button>
       </div>
       <p class="muted" id="gh-msg"></p>
-    </section>
-
-    <section class="panel live-only" id="sec-sync">
-      <div class="panel-head">
-        <h2>🔄 多服务器同步</h2>
-        <span id="sync-status" class="muted"></span>
-      </div>
-      <div class="help-fold"><button class="help-toggle" type="button">📖 说明 ▾</button><div class="help-body"><p class="muted">把服务台同时部署在几台服务器上，数据自动同步：一台宕机了用另一台继续，宕机的那台启动后 30 秒内自动从对方拉最新数据。每台服务器配同一个同步口令（只在自己的服务器之间用，能读写整盘数据，别外泄）和对方的地址。同步是“谁新谁赢”：别在同一秒内往两台服务器上写东西，平时只用一台写，另一台就是热备。同步前会自动备份当前数据（保留最近 5 份）。</p></div></div>
-      <div class="cal-sub-row"><code id="sync-token-value" style="word-break:break-all">还没生成同步口令</code><button class="btn small ghost" id="btn-copy-sync-token" disabled>复制口令</button></div>
-      <div class="fgrid">
-        <label class="span2">同步口令（已有的直接填；留空表示不改）<input id="sync-token" type="password" autocomplete="off" placeholder="和其他服务器上同一个口令"></label>
-        <label class="span2">对方服务器地址（一行一个，填完整的 https 地址）<textarea id="sync-peers" rows="2" placeholder="https://7788-xxx.instabox.tech"></textarea></label>
-      </div>
-      <div class="modal-acts" style="justify-content:flex-start">
-        <button id="btn-sync-token" class="btn primary">生成口令</button>
-        <button id="btn-sync-save" class="btn primary">保存设置</button>
-        <button id="btn-sync-run" class="btn ghost">立即同步</button>
-      </div>
-      <p class="muted" id="sync-msg"></p>
     </section>
 
     <section class="panel live-only" id="sec-dupes">
@@ -611,6 +591,6 @@
 </div>
 
 <div id="toast"></div>
-<script src="/app.js?v=20261107-62"></script>
+<script src="/app.js?v=20261108-w1"></script>
 </body>
 </html>

@@ -1,0 +1,34 @@
+# HubMate —— Workers 原生版（dev 分支）
+# 用法：
+#   本地开发：npx wrangler dev
+#   部署：    npx wrangler deploy
+#   建表：    npx wrangler d1 migrations apply DB --local
+#             npx wrangler d1 migrations apply DB --remote
+# D1 数据库用自动配给：database_id 故意不写，wrangler >= 4.45 和 Deploy to Cloudflare
+# 按钮会在首次部署时自动创建名为 hubmate 的 D1 数据库并把 id 写回这里。
+# 免费套餐注意：D1 每个请求最多 50 条查询、Worker 每次调用最多 10ms CPU；
+# 本项目把密码换成了 Web Crypto PBKDF2（异步，不占 CPU 预算），数据写回用多行
+# INSERT 合并成少数几条语句，就是为了不超这两个上限。
+name = "hubmate"
+main = "src/worker.js"
+compatibility_date = "2026-11-07"
+compatibility_flags = ["nodejs_compat"]
+
+# 静态资源：public/ 由 Workers Static Assets 直接托管（index.html / app.js / style.css 等），
+# 请求先匹配静态文件，匹配不到的才进 Worker；/api/* 一律进 Worker。
+[assets]
+directory = "./public"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "hubmate"
+# database_id 由首次部署时自动创建并写回；本地开发用 wrangler 的本地 D1。
+
+# 定时任务（Cron Triggers）：原来 Node 版靠 setInterval 的四件事
+#   每分钟        TG 机器人回话（/today、/expiring、✅ 全部签到按钮）
+#   每小时整点    TG 提醒 + 自动签到
+#   每 6 小时     死链检测
+#   每天 04:00 UTC GitHub 自动备份
+# 免费套餐的 Cron 触发器可用；如果账号限制每分钟触发，把第一条改成 */5 * * * *。
+[triggers]
+crons = ["* * * * *", "0 * * * *", "0 */6 * * *", "0 4 * * *"]

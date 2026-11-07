@@ -5,6 +5,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/jasonssuns-prog/hubmate)](https://github.com/jasonssuns-prog/hubmate/stargazers)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D18-brightgreen)](https://nodejs.org/)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/jasonssuns-prog/hubmate/tree/dev)
 
 **Keep track of everything you signed up for** — check-in sites, proxies, VPS, games, subscriptions — check in daily and watch expirations, **all on one page**.
 
@@ -133,7 +134,36 @@ The script installs Node.js, creates a low-privilege user, sets up systemd autos
 ### Custom domain (Cloudflare)
 `cloudflare-worker/` contains a reverse-proxy Worker: bind your own domain to it and it forwards visits to your deployed instance, keeping your domain in the address bar. See [`cloudflare-worker/README.md`](./cloudflare-worker/README.md).
 
-> **One-click deploy to Cloudflare Workers?** Not currently possible: this project is a Node.js server (listens on a port, stores data in local files), while Workers is a serverless runtime with no persistent filesystem and no TCP listener — so a [Deploy to Cloudflare](https://developers.cloudflare.com/workers/platform/deploy-buttons/) button can't deploy it directly. Turning it into a native Workers app (KV / D1 storage) would be a separate, larger project — open an Issue if you're interested.
+> **Want to run it on Cloudflare directly, without your own server?** See the "Workers native edition" section below: the dev branch is a Workers-native build (D1 storage) that supports the Deploy to Cloudflare button above.
+
+## ☁️ Workers native edition (one-click deploy to Cloudflare)
+
+> **This is the dev branch**: the server is rewritten as a native Cloudflare Worker, with data in **D1** (SQLite), static pages served by Workers Static Assets, and scheduled jobs (Telegram reminders, dead-link checks, GitHub backup, bot replies) on Cron Triggers. The frontend and features are the same as the Node.js edition, with one exception: **multi-server sync (v61) is gone** — a Worker is a single global deployment, so there is nothing to sync. The Node.js edition (main branch) is still maintained; the two editions do not share data.
+
+### One-click deploy
+Click the **Deploy to Cloudflare** button above, sign in to Cloudflare and pick an account — the rest is automatic: the D1 database is created and bound, the schema migration runs, and the Worker goes live. Open the `*.workers.dev` URL you get and start using it.
+
+### Manual deploy
+```bash
+npx wrangler login
+npx wrangler deploy
+npx wrangler d1 migrations apply DB --remote   # create tables (the Worker also creates them automatically on its first request)
+```
+
+### Migrate data from the Node.js edition
+```bash
+# 1. Copy the Node.js data file (/opt/service-hub/data/data.json on your server, or a full backup).
+#    Do NOT use the file downloaded from the in-app "Backup" button — it already strips passwords and tokens.
+# 2. Generate the import SQL
+node tools/migrate-to-d1.mjs /path/to/data.json > migration-data.sql
+# 3. Try it on the local D1 first, then import to the remote one
+npx wrangler d1 execute hubmate --local  --file=migration-data.sql
+npx wrangler d1 execute hubmate --remote --file=migration-data.sql
+```
+⚠️ **Your login password resets to the default `jason123` after migration**: the Node.js edition stores scrypt password hashes, and the Workers free tier allows only 10ms of CPU per request — verifying scrypt synchronously would fail with Error 1102, so the migration script does not carry the old hash over and instead stores a PBKDF2 hash of the default password. Log in the first time with `jason` / `jason123`, then change the password right away (top-right "change password"). Telegram token, API token, and TOTP secret are migrated as-is, no need to reconfigure them.
+
+### Is the free tier enough?
+Yes, for personal use: D1 allows 5M reads and 100K writes per day, Workers allow 100K requests per day, and static assets are unlimited. Two limits to be aware of: at most 50 D1 queries and 10ms of CPU per request — this project merges data writes into a few multi-row INSERTs and hashes passwords with async Web Crypto specifically to stay under those caps. The Telegram bot poll runs every minute; if your account restricts per-minute triggers, change the first cron in `wrangler.toml` to `*/5 * * * *`.
 
 ## 🔔 Telegram setup
 

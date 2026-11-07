@@ -400,7 +400,7 @@ function renderAll() {
 
   renderBanner();
   if (!live()) renderLanding();
-  else { renderFav(); renderExpiring(); renderPwReuse(); renderYearReview(); renderUptime(); refreshApiTokenStatus(); refreshTotpStatus(); refreshGithubStatus(); refreshSyncStatus(); }
+  else { renderFav(); renderExpiring(); renderPwReuse(); renderYearReview(); renderUptime(); refreshApiTokenStatus(); refreshTotpStatus(); refreshGithubStatus(); }
   const sb = $('#sec-banner');
   if (live() && meta.passwordIsDefault) {
     sb.innerHTML = '🔒 当前还是初始默认密码，部署到服务器前务必点右上角「改密码」换掉！';
@@ -1578,7 +1578,18 @@ $('#pass-save').addEventListener('click', async () => {
 
 $('#btn-export').addEventListener('click', async () => {
   try {
-    await api('/api/export-md', { method: 'POST' });
+    /* Workers 版：服务端没有磁盘，接口直接把 Markdown 当文件下载返回 */
+    const res = await fetch('/api/export-md', { method: 'POST' });
+    if (res.status === 401) throw new Error('请先登录');
+    if (!res.ok) throw new Error('导出失败');
+    const blob = await res.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = '服务台账.md';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
     toast('已导出到 服务台账.md');
   } catch (err) { handleAuthErr(err); }
 });
@@ -2333,61 +2344,6 @@ $('#btn-gh-run')?.addEventListener('click', async () => {
     const r = await api('/api/github-backup/run', { method: 'POST' });
     toast(r.skipped ? '数据没变，不用推' : '已备份到 GitHub');
     refreshGithubStatus();
-  } catch (err) { handleAuthErr(err); }
-  finally { b.disabled = false; }
-});
-
-/* v61：多服务器同步——口令只在生成那一刻显示一次，平时只告诉你配没配 */
-let syncTokenShown = '';
-async function refreshSyncStatus() {
-  if (!live()) return;
-  try {
-    const r = await api('/api/sync/config');
-    $('#sync-peers').value = (r.peers || []).join('\n');
-    $('#sync-status').textContent = r.configured ? '已配置' : '未配置';
-    $('#sync-msg').textContent = r.lastAt ? `上次同步：${r.lastAt}（拉取 ${r.lastPulled} 次，推送 ${r.lastPushed} 次）` : '还没同步过。配好口令和对方地址后，启动时和每 5 分钟自动同步一次。';
-  } catch { /* 未登录时不显示 */ }
-}
-$('#btn-sync-token')?.addEventListener('click', async () => {
-  const b = $('#btn-sync-token');
-  if (b.disabled) return;
-  b.disabled = true;
-  try {
-    const r = await api('/api/sync/token', { method: 'POST' });
-    syncTokenShown = r.token || '';
-    $('#sync-token-value').textContent = syncTokenShown;
-    $('#btn-copy-sync-token').disabled = !syncTokenShown;
-    toast('同步口令已生成（只显示这一次），去其他服务器上填同一个口令');
-  } catch (err) { handleAuthErr(err); }
-  finally { b.disabled = false; }
-});
-$('#btn-copy-sync-token')?.addEventListener('click', async () => {
-  if (!syncTokenShown) return;
-  await copyText(syncTokenShown);
-  toast('同步口令已复制');
-});
-$('#btn-sync-save')?.addEventListener('click', async () => {
-  const b = $('#btn-sync-save');
-  if (b.disabled) return;
-  b.disabled = true;
-  try {
-    const r = await api('/api/sync/config', { method: 'POST', body: JSON.stringify({ token: $('#sync-token').value.trim(), peers: $('#sync-peers').value.split('\n').map((u) => u.trim()).filter(Boolean) }) });
-    $('#sync-token').value = '';
-    $('#sync-status').textContent = r.configured ? '已配置' : '未配置';
-    toast(r.configured ? '已保存，启动时和每 5 分钟自动同步' : '已保存，还差同步口令或对方地址');
-    refreshSyncStatus();
-  } catch (err) { handleAuthErr(err); }
-  finally { b.disabled = false; }
-});
-$('#btn-sync-run')?.addEventListener('click', async () => {
-  const b = $('#btn-sync-run');
-  if (b.disabled) return;
-  b.disabled = true;
-  try {
-    const r = await api('/api/sync/run', { method: 'POST' });
-    toast(r.pulled || r.pushed ? `同步完成：拉取 ${r.pulled} 次，推送 ${r.pushed} 次` : '数据已经是最新，不用同步');
-    await loadAll();
-    refreshSyncStatus();
   } catch (err) { handleAuthErr(err); }
   finally { b.disabled = false; }
 });
