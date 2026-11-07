@@ -145,6 +145,8 @@ a:hover { text-decoration: underline; }
 
 .mode-preview .live-only { display: none !important; }
 .mode-live .preview-only { display: none !important; }
+/* v67 多用户：只有第一个默认用户（管理员）才看得到 admin-only 的入口和面板 */
+body:not(.is-admin) .admin-only { display: none !important; }
 
 /* ---------- 布局 ---------- */
 .layout { display: grid; grid-template-columns: 262px minmax(0, 1fr); min-height: 100vh; }

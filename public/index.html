@@ -11,7 +11,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="apple-touch-icon" href="/icon-180.png">
-<link rel="stylesheet" href="/style.css?v=20261108-w2">
+<link rel="stylesheet" href="/style.css?v=20261108-w3">
 </head>
 <body class="mode-preview" data-theme="neon">
 
@@ -104,7 +104,10 @@
       <a href="#sec-notify" class="nav-item live-only"><i>🔔</i>通知设置</a>
       <a href="#sec-apitoken" class="nav-item live-only"><i>🔑</i>API 令牌</a>
       <a href="#sec-totp" class="nav-item live-only"><i>🔐</i>二次验证</a>
-      <a href="#sec-github" class="nav-item live-only"><i>☁️</i>GitHub 备份</a>
+      <a href="#sec-account" class="nav-item live-only"><i>👤</i>我的账号</a>
+      <a href="#sec-users" class="nav-item live-only admin-only"><i>👥</i>用户管理</a>
+      <a href="#sec-invites" class="nav-item live-only admin-only"><i>🎟️</i>邀请码</a>
+      <a href="#sec-github" class="nav-item live-only admin-only"><i>☁️</i>GitHub 备份</a>
       <a href="#sec-dupes" class="nav-item live-only"><i>♻️</i>重复清理</a>
       <a href="#sec-pwreuse" class="nav-item live-only"><i>🔐</i>密码复用 <span class="nav-badge" id="pwreuse-nav-count"></span></a>
       <a href="#sec-vault" class="nav-item live-only"><i>🔐</i>账号库</a>
@@ -313,6 +316,22 @@
       <p class="muted" id="totp-msg">启用步骤：点“生成密钥”→ 在 Authenticator 里手动添加账号，密钥填上面那串（或把 otpauth 链接粘到支持的工具里）→ 输一次动态码点“启用二次验证”。</p>
     </section>
 
+    <!-- 我的账号（v67 多用户：改用户名要输当前密码确认；最近登录在下面“🕐 最近登录”面板） -->
+    <section id="sec-account" class="panel live-only">
+      <div class="panel-head">
+        <h2>👤 我的账号</h2>
+        <span id="acc-current" class="muted"></span>
+      </div>
+      <p class="muted">改用户名要输当前密码确认，用户名全站唯一，不能重名。改密码用侧栏「⚙️ 密码修改」。登录后看到提示「请改掉默认密码」时先改掉它。</p>
+      <form id="rename-form" class="fgrid">
+        <label>新用户名<input id="rename-new" autocomplete="off" placeholder="2–32 位，全站唯一" required></label>
+        <label>当前密码<input id="rename-pass" type="password" autocomplete="current-password" required></label>
+        <div class="modal-acts span2">
+          <button id="btn-rename" class="btn" type="submit">改用户名</button>
+        </div>
+      </form>
+    </section>
+
     <section class="panel live-only" id="sec-logins">
       <div class="panel-head">
         <h2>🕐 最近登录</h2>
@@ -322,12 +341,40 @@
       <div id="logins-list"></div>
     </section>
 
+    <!-- 用户管理（v67 多用户：仅管理员可见；只看账号信息，看不到任何人的业务数据） -->
+    <section id="sec-users" class="panel live-only admin-only">
+      <div class="panel-head">
+        <h2>👥 用户管理</h2>
+      </div>
+      <p class="muted">这里只看账号信息——用户名、注册时间、封禁状态、最后登录。管理员看不到也改不了任何用户的服务、笔记、账号等业务数据。删除会连同该用户全部数据一起删掉，不能删自己。</p>
+      <form id="create-user-form" class="fgrid">
+        <label>用户名<input id="cu-user" autocomplete="off" placeholder="2–32 位，全站唯一" required></label>
+        <label>密码<input id="cu-pass" type="password" autocomplete="new-password" placeholder="至少 6 位，留空=自动生成 12 位" value=""></label>
+        <div class="modal-acts span2">
+          <button id="btn-create-user" class="btn primary" type="submit">直接创建用户（不用邀请码）</button>
+        </div>
+      </form>
+      <div id="users-list"></div>
+    </section>
+
+    <!-- 邀请码（v67 多用户：仅管理员可见；一个码只能注册一次） -->
+    <section id="sec-invites" class="panel live-only admin-only">
+      <div class="panel-head">
+        <h2>🎟️ 邀请码</h2>
+      </div>
+      <p class="muted">注册要邀请码（第一个默认用户除外）。每个码只能用一次，注册成功即消耗。把码发给要注册的人，别发到公开地方。</p>
+      <div class="modal-acts">
+        <button id="btn-gen-invite" class="btn primary">生成一个邀请码</button>
+      </div>
+      <div id="invites-list"></div>
+    </section>
+
     <section class="panel live-only" id="sec-github">
       <div class="panel-head">
         <h2>☁️ GitHub 备份</h2>
         <span id="github-status" class="muted"></span>
       </div>
-      <div class="help-fold"><button class="help-toggle" type="button">📖 说明 ▾</button><div class="help-body"><p class="muted">每天自动把数据推到你的一个私有 GitHub 仓库（单个文件 hubmate-backup.json，Git 历史就是备份历史），服务器挂了也能从 GitHub 恢复。推之前去掉登录密码、Telegram Token、API 令牌、二次验证密钥和自动签到的请求头；数据没变就不推。Token 需要 repo 权限（classic Token 勾 repo，或 fine-grained Token 给仓库的 Contents 写权限）。</p></div></div>
+      <div class="help-fold"><button class="help-toggle" type="button">📖 说明 ▾</button><div class="help-body"><p class="muted">每天自动把数据推到你的一个私有 GitHub 仓库（单个文件 hubmate-backup.json，Git 历史就是备份历史），服务器挂了也能从 GitHub 恢复。推之前去掉所有用户的登录密码、Telegram Token、API 令牌、二次验证密钥和自动签到的请求头；数据没变就不推。Token 需要 repo 权限（classic Token 勾 repo，或 fine-grained Token 给仓库的 Contents 写权限）。备份里含所有用户的数据（v67 多用户），只有管理员能配、能下载、能恢复。</p></div></div>
       <div class="fgrid">
         <label class="span2">GitHub Token（只存服务端，留空表示不改）<input id="gh-token" type="password" autocomplete="off" placeholder="ghp_… 或 github_pat_…"></label>
         <label class="span2">私有仓库（用户名/仓库名）<input id="gh-repo" placeholder="比如 jasonssuns-prog/hubmate-data"></label>
@@ -542,7 +589,34 @@
         <button class="btn primary" type="submit">登 录</button>
       </div>
     </form>
+    <p class="hint">没有账号？<a href="#" id="link-register">用邀请码注册</a></p>
     <p class="hint">忘了初始密码？看本地的「说明.md」或部署文档</p>
+  </div>
+</div>
+
+<!-- 注册 弹窗（v67 多用户：除第一个默认用户外，注册必须提供邀请码） -->
+<div id="register-overlay" class="modal-mask hidden">
+  <div class="modal narrow">
+    <h3>注册账号</h3>
+    <form id="register-form" class="fgrid">
+      <label class="span2">用户名（2–32 位，字母/数字/中文/下划线）<input id="r-user" autocomplete="username" required></label>
+      <label class="span2">密码（至少 6 位）<input id="r-pass" type="password" autocomplete="new-password" required></label>
+      <label class="span2">再输一遍密码<input id="r-pass2" type="password" autocomplete="new-password" required></label>
+      <label class="span2">邀请码<input id="r-invite" autocomplete="off" placeholder="HUB-XXXX-XXXX-XXXX" required></label>
+      <label class="span2">验证码
+        <span class="captcha-row">
+          <input id="r-captcha" autocomplete="off" placeholder="输入图中字符" required>
+          <span id="r-captcha-img" class="captcha-img" title="点击换一张"></span>
+          <button id="r-captcha-refresh" class="btn ghost small" type="button">换一张</button>
+        </span>
+      </label>
+      <div id="r-err" class="err span2 hidden"></div>
+      <div class="modal-acts span2">
+        <button id="register-cancel" class="btn ghost" type="button">取消</button>
+        <button class="btn primary" type="submit">注 册</button>
+      </div>
+    </form>
+    <p class="hint">邀请码只能找管理员要，一个码只能注册一次。</p>
   </div>
 </div>
 
@@ -662,6 +736,6 @@
 </div>
 
 <div id="toast"></div>
-<script src="/app.js?v=20261108-w2"></script>
+<script src="/app.js?v=20261108-w3"></script>
 </body>
 </html>

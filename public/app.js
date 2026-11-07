@@ -486,7 +486,14 @@ function renderAll() {
 
   renderBanner();
   if (!live()) renderLanding();
-  else { renderFav(); renderExpiring(); renderPwReuse(); renderYearReview(); renderUptime(); renderVault(); renderSecScore(); renderRotate(); renderMonthly(); renderAvail(); refreshApiTokenStatus(); refreshTotpStatus(); refreshGithubStatus(); loadLogins(); }
+  else {
+    /* v67 多用户：管理员才看得到“用户管理/邀请码”面板（CSS admin-only 兜底），
+       body 上的 is-admin 类决定显隐；#acc-current 显示当前登录用户 */
+    document.body.classList.toggle('is-admin', !!meta.isAdmin);
+    const acc = $('#acc-current');
+    if (acc) acc.textContent = me.username ? `当前登录：${me.username}${meta.isAdmin ? '（管理员）' : ''}` : '';
+    renderFav(); renderExpiring(); renderPwReuse(); renderYearReview(); renderUptime(); renderVault(); renderSecScore(); renderRotate(); renderMonthly(); renderAvail(); refreshApiTokenStatus(); refreshTotpStatus(); refreshGithubStatus(); loadLogins(); renderUsers(); renderInvites();
+  }
   const sb = $('#sec-banner');
   if (live() && meta.passwordIsDefault) {
     sb.innerHTML = '🔒 当前还是初始默认密码，部署到服务器前务必点右上角「改密码」换掉！';
@@ -1456,6 +1463,55 @@ document.body.addEventListener('click', async (e) => {
       return;
     }
     if (act === 'acc-del') { deleteAccAccount(btn.dataset.acc); return; }
+    /* v67 多用户：用户管理（仅管理员；接口只返回账号信息）与邀请码 */
+    if (act === 'admin-user-reset') {
+      try {
+        const r = await api(`/api/admin/users/${id}/reset-password`, { method: 'POST' });
+        resetTempPw = { userId: id, username: r.username, password: r.tempPassword };
+        toast(`已重置 ${r.username} 的密码，临时密码 ${r.tempPassword}（只显示这一次）`);
+        renderUsers();
+      } catch (err) { handleAuthErr(err); }
+      return;
+    }
+    if (act === 'admin-user-rename') { renameUserId = id; delUserArmId = null; renderUsers(); const inp = $('#admin-rename-input'); if (inp) { inp.focus(); inp.select(); } return; }
+    if (act === 'admin-user-rename-cancel') { renameUserId = null; renderUsers(); return; }
+    if (act === 'admin-user-rename-confirm') {
+      const inp = $('#admin-rename-input');
+      const newName = inp ? inp.value.trim() : '';
+      if (!newName) { toast('新用户名不能为空', 'bad'); return; }
+      try {
+        await api(`/api/admin/users/${id}/rename`, { method: 'POST', body: JSON.stringify({ newUsername: newName }) });
+        renameUserId = null;
+        toast('已改名');
+        renderUsers();
+      } catch (err) { handleAuthErr(err); }
+      return;
+    }
+    if (act === 'admin-user-ban') {
+      try { await api(`/api/admin/users/${id}/ban`, { method: 'POST' }); toast('已封禁，该用户登不进来了，数据还在'); renderUsers(); }
+      catch (err) { handleAuthErr(err); }
+      return;
+    }
+    if (act === 'admin-user-unban') {
+      try { await api(`/api/admin/users/${id}/unban`, { method: 'POST' }); toast('已解封'); renderUsers(); }
+      catch (err) { handleAuthErr(err); }
+      return;
+    }
+    if (act === 'admin-user-del') {
+      if (delUserArmId !== id) { delUserArmId = id; renderUsers(); return; }
+      delUserArmId = null;
+      try {
+        await api(`/api/admin/users/${id}`, { method: 'DELETE' });
+        toast('已删除该用户及他的全部数据');
+        renderUsers();
+      } catch (err) { handleAuthErr(err); }
+      return;
+    }
+    if (act === 'invite-revoke') {
+      try { await api(`/api/invite-codes/${encodeURIComponent(id)}/revoke`, { method: 'POST' }); toast('邀请码已作废'); renderInvites(); }
+      catch (err) { handleAuthErr(err); }
+      return;
+    }
     /* v65：账号库——编辑/删除库账号（面板里），把本地账号存进库（弹窗里） */
     if (act === 'vault-edit') {
       const v = vault.find((x) => x.id === id);
@@ -1685,6 +1741,78 @@ const landingFootLogin = $('#landing-foot-login');
 if (landingFootLogin) landingFootLogin.addEventListener('click', openLogin);
 $('#login-cancel').addEventListener('click', () => $('#login-overlay').classList.add('hidden'));
 $('#login-overlay').addEventListener('click', (e) => { if (e.target === e.currentTarget) $('#login-overlay').classList.add('hidden'); });
+
+/* v67 多用户：注册（登录页入口 → 注册弹窗，用户名+密码+邀请码+验证码） */
+$('#link-register').addEventListener('click', (e) => { e.preventDefault(); openRegister(); });
+$('#register-cancel').addEventListener('click', closeRegister);
+$('#register-overlay').addEventListener('click', (e) => { if (e.target === e.currentTarget) closeRegister(); });
+$('#r-captcha-refresh').addEventListener('click', loadRegisterCaptcha);
+$('#r-captcha-img').addEventListener('click', loadRegisterCaptcha);
+$('#register-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const errBox = $('#r-err');
+  const user = $('#r-user').value.trim();
+  const pass = $('#r-pass').value;
+  const pass2 = $('#r-pass2').value;
+  const invite = $('#r-invite').value.trim();
+  const captcha = $('#r-captcha').value.trim();
+  if (pass !== pass2) { errBox.textContent = '两次密码不一样'; errBox.classList.remove('hidden'); return; }
+  try {
+    await api('/api/register', { method: 'POST', body: JSON.stringify({ username: user, password: pass, inviteCode: invite, captchaId: regCaptchaId, captcha }) });
+    closeRegister();
+    toast('注册成功，已自动登录');
+    await loadAll();
+  } catch (err) {
+    errBox.textContent = err.message;
+    errBox.classList.remove('hidden');
+    loadRegisterCaptcha();
+  }
+});
+
+/* v67 多用户：改自己的用户名（要输当前密码确认） */
+$('#rename-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const newName = $('#rename-new').value.trim();
+  const pass = $('#rename-pass').value;
+  if (!newName) { toast('新用户名不能为空', 'bad'); return; }
+  try {
+    const r = await api('/api/username', { method: 'POST', body: JSON.stringify({ newUsername: newName, password: pass }) });
+    me.username = r.username;
+    $('#rename-new').value = '';
+    $('#rename-pass').value = '';
+    toast(`用户名已改成 ${r.username}`);
+    renderAll();
+  } catch (err) { handleAuthErr(err); }
+});
+
+/* v67 多用户：管理员直接创建用户（不用邀请码；密码留空=自动生成 12 位） */
+$('#create-user-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const user = $('#cu-user').value.trim();
+  const pass = $('#cu-pass').value;
+  if (!user) { toast('用户名不能为空', 'bad'); return; }
+  try {
+    const r = await api('/api/admin/users', { method: 'POST', body: JSON.stringify({ username: user, password: pass }) });
+    $('#cu-user').value = '';
+    $('#cu-pass').value = '';
+    if (r.tempPassword) {
+      resetTempPw = { userId: r.id, username: r.username, password: r.tempPassword };
+      toast(`已创建 ${r.username}，临时密码 ${r.tempPassword}（只显示这一次）`);
+    } else {
+      toast(`已创建 ${r.username}`);
+    }
+    renderUsers();
+  } catch (err) { handleAuthErr(err); }
+});
+
+/* v67 多用户：管理员生成邀请码 */
+$('#btn-gen-invite').addEventListener('click', async () => {
+  try {
+    const r = await api('/api/invite-codes', { method: 'POST' });
+    toast(`邀请码已生成：${r.code}，发给要注册的人`);
+    renderInvites();
+  } catch (err) { handleAuthErr(err); }
+});
 
 $('#btn-logout').addEventListener('click', async () => {
   try { await api('/api/logout', { method: 'POST' }); } catch {}
@@ -2395,6 +2523,90 @@ async function loadLogins() {
     const list = r.logins || [];
     if (!list.length) { box.innerHTML = '<p class="muted">还没有登录记录（从这次登录开始记）。</p>'; return; }
     box.innerHTML = list.map((l) => `<div class="landing-checkin-item"><span class="ck">🕐</span><span class="ck-name">${esc(l.at || '')}</span><span class="ck-note">${esc(l.ip || '')} · ${esc(l.device || '')}</span></div>`).join('');
+  } catch { box.innerHTML = '<p class="muted">加载失败，刷新再试。</p>'; }
+}
+
+/* ---------- v67 多用户：注册 / 改用户名 / 用户管理 / 邀请码 ---------- */
+let regCaptchaId = '';
+let regCaptchaSeq = 0;
+let adminUsers = []; /* 用户管理列表（只含账号信息，绝无业务数据） */
+let adminInvites = [];
+let renameUserId = null; /* 正在改名的用户 id（null = 不在改名状态） */
+let delUserArmId = null; /* 二次确认删除的用户 id */
+let resetTempPw = null; /* { userId, username, password }：重置/新建后只显示一次的临时密码 */
+
+async function loadRegisterCaptcha() {
+  const seq = ++regCaptchaSeq;
+  try {
+    const r = await api('/api/captcha');
+    if (seq !== regCaptchaSeq) return;
+    regCaptchaId = r.id;
+    $('#r-captcha-img').innerHTML = r.svg;
+  } catch { /* 验证码加载失败时注册会由服务端报错 */ }
+}
+function openRegister() {
+  $('#login-overlay').classList.add('hidden');
+  $('#r-err').classList.add('hidden');
+  $('#register-overlay').classList.remove('hidden');
+  loadRegisterCaptcha();
+  $('#r-user').focus();
+}
+function closeRegister() { $('#register-overlay').classList.add('hidden'); }
+
+/* 用户管理列表（仅管理员；接口只返回账号信息） */
+async function renderUsers() {
+  const box = $('#users-list');
+  if (!box) return;
+  if (!meta?.isAdmin) { box.innerHTML = ''; return; }
+  try {
+    const r = await api('/api/admin/users');
+    adminUsers = r.users || [];
+    if (!adminUsers.length) { box.innerHTML = '<p class="muted">还没有注册用户。</p>'; return; }
+    box.innerHTML = adminUsers.map((u) => {
+      const isSelf = u.username === me.username;
+      const temp = resetTempPw && resetTempPw.userId === u.id
+        ? `<div class="landing-checkin-item"><span class="ck">🔑</span><span class="ck-name">临时密码：<b>${esc(resetTempPw.password)}</b></span><span class="ck-note">只显示这一次，记下来发给对方</span><button class="btn small ghost" data-copy="${esc(resetTempPw.password)}">复制</button></div>` : '';
+      const renameRow = renameUserId === u.id
+        ? `<div class="landing-checkin-item"><span class="ck">✏️</span><input id="admin-rename-input" value="${esc(u.username)}" style="flex:1;min-width:0"><button class="btn small primary" data-act="admin-user-rename-confirm" data-id="${u.id}">确认改名</button><button class="btn small ghost" data-act="admin-user-rename-cancel">取消</button></div>`
+        : '';
+      const delBtn = delUserArmId === u.id
+        ? `<button class="btn small" data-act="admin-user-del" data-id="${u.id}" style="background:#7f1d1d">确认删除？数据全删</button>`
+        : `<button class="btn small ghost" data-act="admin-user-del" data-id="${u.id}" ${isSelf ? 'disabled title="不能删自己"' : ''}>删除</button>`;
+      return `<div class="landing-checkin-item" style="flex-wrap:wrap">
+        <span class="ck">${u.isAdmin ? '👑' : '👤'}</span>
+        <span class="ck-name">${esc(u.username)}${u.isAdmin ? '（管理员）' : ''}${u.banned ? ' ⛔已封禁' : ''}${u.passwordIsDefault ? ' · 默认密码' : ''}</span>
+        <span class="ck-note">注册 ${esc(u.createdAt || '—')} · 最后登录 ${esc(u.lastLoginAt || '—')}</span>
+        <button class="btn small ghost" data-act="admin-user-reset" data-id="${u.id}" ${isSelf ? 'disabled title="改自己的密码用“密码修改”"' : ''}>重置密码</button>
+        <button class="btn small ghost" data-act="admin-user-rename" data-id="${u.id}">改名</button>
+        ${u.banned
+          ? `<button class="btn small ghost" data-act="admin-user-unban" data-id="${u.id}" ${isSelf ? 'disabled title="不能封禁自己"' : ''}>解封</button>`
+          : `<button class="btn small ghost" data-act="admin-user-ban" data-id="${u.id}" ${isSelf ? 'disabled title="不能封禁自己"' : ''}>封禁</button>`}
+        ${delBtn}
+      </div>${temp}${renameRow}`;
+    }).join('');
+  } catch { box.innerHTML = '<p class="muted">加载失败，刷新再试。</p>'; }
+}
+
+/* 邀请码列表（仅管理员） */
+async function renderInvites() {
+  const box = $('#invites-list');
+  if (!box) return;
+  if (!meta?.isAdmin) { box.innerHTML = ''; return; }
+  try {
+    const r = await api('/api/invite-codes');
+    adminInvites = r.codes || [];
+    if (!adminInvites.length) { box.innerHTML = '<p class="muted">还没有邀请码，点上面“生成一个邀请码”。</p>'; return; }
+    box.innerHTML = adminInvites.map((c) => {
+      const used = !!c.usedBy;
+      const status = used ? `已被 ${esc(c.usedBy || '已注销')} 使用（${esc(c.usedAt || '')}）` : '未使用';
+      return `<div class="landing-checkin-item">
+        <span class="ck">🎟️</span>
+        <span class="ck-name"><b>${esc(c.code)}</b></span>
+        <span class="ck-note">${esc(c.createdAt || '')} · ${status}</span>
+        <button class="btn small ghost" data-copy="${esc(c.code)}">复制</button>
+        ${used ? '' : `<button class="btn small ghost" data-act="invite-revoke" data-id="${esc(c.code)}">作废</button>`}
+      </div>`;
+    }).join('');
   } catch { box.innerHTML = '<p class="muted">加载失败，刷新再试。</p>'; }
 }
 

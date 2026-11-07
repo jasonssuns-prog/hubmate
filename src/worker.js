@@ -18,9 +18,10 @@ import { Buffer } from 'node:buffer';
 
 const SESSION_MS = 30 * 86400 * 1000;
 
-/* DDL：和 migrations/0001_init.sql 同一份，Worker 首次收到请求时自动执行
-   （CREATE TABLE IF NOT EXISTS，幂等），一键部署后不用手动建表也能用。
-   改表结构时两边一起改。 */
+/* DDL：和 migrations/0001_init.sql、0002_multiuser.sql 同一份，Worker 首次收到请求时
+   自动执行（CREATE TABLE IF NOT EXISTS，幂等），一键部署后不用手动建表也能用。
+   改表结构时三边一起改。v67 多用户：users / invite_codes 两张新表，
+   services / notes / sessions 各加 userId 列（ensureSchema 里按 PRAGMA 幂等补列）。 */
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS services (id TEXT PRIMARY KEY, data TEXT NOT NULL);
@@ -29,11 +30,21 @@ CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, created INTEGER NOT
 CREATE TABLE IF NOT EXISTS captchas (id TEXT PRIMARY KEY, code TEXT NOT NULL, expiresAt INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS login_throttle (ip TEXT PRIMARY KEY, count INTEGER NOT NULL DEFAULT 0, resetAt INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS backups (id INTEGER PRIMARY KEY AUTOINCREMENT, createdAt TEXT NOT NULL, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, passwordHash TEXT NOT NULL, passwordIsDefault INTEGER NOT NULL DEFAULT 1, isAdmin INTEGER NOT NULL DEFAULT 0, banned INTEGER NOT NULL DEFAULT 0, createdAt TEXT NOT NULL DEFAULT '', lastLoginAt TEXT NOT NULL DEFAULT '', totpSecret TEXT NOT NULL DEFAULT '', totpEnabled INTEGER NOT NULL DEFAULT 0, apiToken TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS invite_codes (code TEXT PRIMARY KEY, createdAt TEXT NOT NULL DEFAULT '', usedBy TEXT NOT NULL DEFAULT '', usedAt TEXT NOT NULL DEFAULT '');
 `;
 let schemaPromise = null;
 function ensureSchema(db) {
   if (!schemaPromise) {
-    schemaPromise = db.exec(SCHEMA_SQL).catch((e) => { schemaPromise = null; throw e; });
+    schemaPromise = (async () => {
+      await db.exec(SCHEMA_SQL);
+      /* v67：给旧库补 userId 列（PRAGMA 查了再加，重复跑也不报错） */
+      for (const table of ['services', 'notes', 'sessions']) {
+        const info = await db.prepare(`PRAGMA table_info(${table})`).all();
+        const has = (info.results || []).some((c) => c.name === 'userId');
+        if (!has) await db.exec(`ALTER TABLE ${table} ADD COLUMN userId TEXT NOT NULL DEFAULT ''`);
+      }
+    })().catch((e) => { schemaPromise = null; throw e; });
   }
   return schemaPromise;
 }
@@ -338,6 +349,8 @@ function metaPayload(data) {
   const best = Math.max(0, ...data.services.map((s) => maxRun(s.checkins || [])));
   return {
     username: data.username,
+    /* v67：多用户——前端靠 isAdmin 决定显不显“用户管理”和“邀请码”面板 */
+    isAdmin: !!data.isAdmin,
     xp: data.xp,
     level: levelOf(data.xp),
     passwordIsDefault: data.passwordIsDefault !== false,
@@ -388,39 +401,157 @@ function publicServices(data) {
   }));
 }
 
-/* ---------- 数据层：D1 ---------- */
-/* loadData：从 D1 拼出和 Node 版 data.json 一模一样的 data 对象。
-   读 3 条语句（meta / services / notes），免费套餐每请求 50 条查询的上限绰绰有余。 */
-async function loadData(db) {
+/* ---------- 数据层：D1（v67 多用户） ---------- */
+/* per-user 配置存在 meta 表里，键名前缀 u:<userId>:（xp / achievements / flags /
+   history / categories / notify / sharedAccounts / monthlyReports /
+   archivedLog / loginHistory）。账号字段（用户名/密码哈希/TOTP/API 令牌）存在
+   users 表里。GitHub 备份配置是全局的（只有管理员配），仍用不带前缀的
+   githubBackup 键。业务表 services / notes / sessions 各有一列 userId 隔离。 */
+const USER_META_KEYS = ['xp', 'achievements', 'flags', 'history', 'categories', 'notify', 'sharedAccounts', 'monthlyReports', 'archivedLog', 'loginHistory'];
+function userMetaKey(uid, key) { return `u:${uid}:${key}`; }
+
+/* ---------- 用户 ---------- */
+/* 对外只返回账号信息（用户名/是否管理员/是否封禁/注册时间/最后登录），绝不返回
+   密码哈希、TOTP 密钥、API 令牌和任何业务数据 */
+function publicUser(u) {
+  if (!u) return null;
+  return { id: u.id, username: u.username, passwordIsDefault: !!u.passwordIsDefault, isAdmin: !!u.isAdmin, banned: !!u.banned, createdAt: u.createdAt || '', lastLoginAt: u.lastLoginAt || '' };
+}
+async function getUserById(db, id) {
+  if (!id) return null;
+  return await db.prepare('SELECT * FROM users WHERE id = ?').bind(id).first();
+}
+async function getUserByUsername(db, username) {
+  if (!username) return null;
+  return await db.prepare('SELECT * FROM users WHERE username = ?').bind(username).first();
+}
+async function listUsers(db) {
+  const r = await db.prepare('SELECT * FROM users ORDER BY createdAt ASC, id ASC').all();
+  return r.results || [];
+}
+/* 第一个管理员（注册时间最早的 isAdmin 用户）：公开落地页和日历订阅用他的数据 */
+async function getAdminUser(db) {
+  return await db.prepare('SELECT * FROM users WHERE isAdmin = 1 ORDER BY createdAt ASC, id ASC LIMIT 1').first();
+}
+/* 用户名规则：2–32 位，字母/数字/中文/下划线，中间可带空格、点、连字符，
+   首尾必须是字母/数字/中文/下划线 */
+function validUsername(name) {
+  const s = String(name || '').trim();
+  if (s.length < 2 || s.length > 32) return false;
+  if (!/^[A-Za-z0-9_\u4e00-\u9fa5]/.test(s)) return false;
+  if (!/[A-Za-z0-9_\u4e00-\u9fa5]$/.test(s)) return false;
+  return /^[A-Za-z0-9_\u4e00-\u9fa5 .-]+$/.test(s);
+}
+/* 邀请码：HUB-XXXX-XXXX-XXXX，12 位无歧义字符（去掉 I/O/0/1），随机生成 */
+function genInviteCode() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let s = '';
+  for (let i = 0; i < 12; i++) s += chars[Math.floor(Math.random() * chars.length)];
+  return `HUB-${s.slice(0, 4)}-${s.slice(4, 8)}-${s.slice(8, 12)}`;
+}
+/* 删一个用户及其全部数据（服务、记事、会话、per-user 配置）。调用前先确认
+   不是删自己；invite_codes 里被他用过的码留着当历史（usedBy 只剩 id）。 */
+async function deleteUserData(db, userId) {
+  const uid = String(userId);
+  await db.prepare('DELETE FROM sessions WHERE userId = ?').bind(uid).run();
+  await db.prepare('DELETE FROM services WHERE userId = ?').bind(uid).run();
+  await db.prepare('DELETE FROM notes WHERE userId = ?').bind(uid).run();
+  await db.prepare('DELETE FROM meta WHERE key LIKE ?').bind(`u:${uid}:%`).run();
+  await db.prepare('DELETE FROM users WHERE id = ?').bind(uid).run();
+}
+
+/* ---------- 旧库迁移（只跑一次） ---------- */
+/* users 表还是空的，说明是 v67 之前的库：有两种情况——
+   (1) 旧版单用户库（meta 里有 username）：把唯一的那个用户升成管理员，
+       全部业务数据归他，per-user 配置键改名 u:<id>:<key>，旧的账号键删掉；
+   (2) 全新安装（meta 里也没有 username）：建默认管理员 jason/jason123 +
+       两条示例数据（和 Node 版首次启动一模一样）。
+   旧库迁移用 db.batch 一次提交（原子操作，失败整体回滚，不留半截状态）。 */
+let usersPromise = null;
+function ensureUsers(db) {
+  if (!usersPromise) {
+    usersPromise = migrateUsersIfNeeded(db).catch((e) => { usersPromise = null; throw e; });
+  }
+  return usersPromise;
+}
+async function migrateUsersIfNeeded(db) {
   await ensureSchema(db);
+  const row = await db.prepare('SELECT COUNT(*) AS n FROM users').first();
+  if (row && row.n > 0) return;
   const metaRows = await db.prepare('SELECT key, value FROM meta').all();
   const meta = {};
   for (const r of (metaRows.results || [])) meta[r.key] = r.value;
-  const svcRows = await db.prepare('SELECT data FROM services').all();
-  const services = (svcRows.results || []).map((r) => JSON.parse(r.data));
-  const noteRows = await db.prepare('SELECT id, title, content, createdAt, updatedAt FROM notes ORDER BY updatedAt DESC').all();
-  const notes = (noteRows.results || []).map((r) => ({ id: r.id, title: r.title, content: r.content, createdAt: r.createdAt, updatedAt: r.updatedAt }));
-  if (!meta.username) {
-    /* 全新安装：播默认账号 + 两条示例数据（和 Node 版首次启动一模一样） */
-    const data = await defaultData();
-    await saveData(db, data);
-    return data;
+  if (meta.username) {
+    const adminId = randomBytes(6).toString('hex');
+    const stmts = [
+      db.prepare('INSERT INTO users (id, username, passwordHash, passwordIsDefault, isAdmin, banned, createdAt, lastLoginAt, totpSecret, totpEnabled, apiToken) VALUES (?, ?, ?, ?, 1, 0, ?, ?, ?, ?, ?)')
+        .bind(adminId, String(meta.username), String(meta.passwordHash || ''), meta.passwordIsDefault ? (JSON.parse(meta.passwordIsDefault) ? 1 : 0) : 1, cstDateTime(), '', String(meta.totpSecret || ''), meta.totpEnabled ? (JSON.parse(meta.totpEnabled) ? 1 : 0) : 0, String(meta.apiToken || '')),
+      db.prepare('UPDATE services SET userId = ?').bind(adminId),
+      db.prepare('UPDATE notes SET userId = ?').bind(adminId)
+    ];
+    for (const k of USER_META_KEYS) {
+      if (meta[k] !== undefined) {
+        stmts.push(db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').bind(userMetaKey(adminId, k), meta[k]));
+        stmts.push(db.prepare('DELETE FROM meta WHERE key = ?').bind(k));
+      }
+    }
+    for (const k of ['username', 'passwordHash', 'passwordIsDefault', 'totpSecret', 'totpEnabled', 'apiToken']) {
+      stmts.push(db.prepare('DELETE FROM meta WHERE key = ?').bind(k));
+    }
+    await db.batch(stmts);
+    console.log(`[multiuser] 旧版单用户数据已迁移：${meta.username} 升为管理员`);
+    return;
   }
+  /* 全新安装 */
+  const adminId = randomBytes(6).toString('hex');
+  await db.prepare('INSERT INTO users (id, username, passwordHash, passwordIsDefault, isAdmin, banned, createdAt, lastLoginAt, totpSecret, totpEnabled, apiToken) VALUES (?, ?, ?, 1, 1, 0, ?, ?, ?, 0, ?)')
+    .bind(adminId, 'jason', await hashPassword('jason123'), cstDateTime(), '', '', '').run();
+  const data = await defaultData(adminId);
+  await saveData(db, data);
+}
+
+/* loadData：从 D1 拼出和 Node 版 data.json 一模一样的 data 对象，但只含
+   userId 这一个用户的数据（服务、记事、配置全按 userId 隔离）。
+   userId 不传或用户不存在时，公开接口用第一个管理员的数据。
+   读：users 表 1 条 + meta（该用户的前缀键 + 全局 githubBackup）+
+   services / notes（按 userId 过滤）。 */
+async function loadData(db, userId) {
+  await ensureSchema(db);
+  await ensureUsers(db);
+  let user = userId ? await getUserById(db, userId) : null;
+  if (!user) {
+    user = await getAdminUser(db);
+    if (!user) throw new Error('no admin user');
+  }
+  const uid = user.id;
+  const metaRows = await db.prepare('SELECT key, value FROM meta WHERE key LIKE ?').bind(`u:${uid}:%`).all();
+  const meta = {};
+  for (const r of (metaRows.results || [])) meta[r.key.slice(uid.length + 3)] = r.value;
+  const gbRow = await db.prepare("SELECT value FROM meta WHERE key = 'githubBackup'").first();
+  const svcRows = await db.prepare('SELECT data FROM services WHERE userId = ?').bind(uid).all();
+  const services = (svcRows.results || []).map((r) => JSON.parse(r.data));
+  const noteRows = await db.prepare('SELECT id, title, content, createdAt, updatedAt FROM notes WHERE userId = ? ORDER BY updatedAt DESC').bind(uid).all();
+  const notes = (noteRows.results || []).map((r) => ({ id: r.id, title: r.title, content: r.content, createdAt: r.createdAt, updatedAt: r.updatedAt }));
   const data = {
-    username: meta.username,
-    passwordHash: meta.passwordHash || '',
-    passwordIsDefault: meta.passwordIsDefault ? JSON.parse(meta.passwordIsDefault) : true,
+    userId: uid,
+    username: user.username,
+    passwordHash: user.passwordHash || '',
+    passwordIsDefault: !!user.passwordIsDefault,
+    isAdmin: !!user.isAdmin,
+    banned: !!user.banned,
+    createdAt: user.createdAt || '',
+    lastLoginAt: user.lastLoginAt || '',
     xp: Number(meta.xp || 0),
-    apiToken: meta.apiToken || undefined,
-    totpSecret: meta.totpSecret || undefined,
-    totpEnabled: meta.totpEnabled ? JSON.parse(meta.totpEnabled) : false,
+    apiToken: user.apiToken || undefined,
+    totpSecret: user.totpSecret || undefined,
+    totpEnabled: !!user.totpEnabled,
     achievements: safeJSON(meta.achievements, {}),
     flags: safeJSON(meta.flags, {}),
     history: safeJSON(meta.history, {}),
     categories: safeJSON(meta.categories, null),
     notify: safeJSON(meta.notify, {}),
-    githubBackup: safeJSON(meta.githubBackup, {}),
-    /* v65：共享账号库、月度报告、归档记录、登录历史（都是 meta 表里的 JSON） */
+    githubBackup: gbRow ? safeJSON(gbRow.value, {}) : {},
+    /* v65：共享账号库、月度报告、归档记录、登录历史（都是 per-user 的 meta 键） */
     sharedAccounts: safeJSON(meta.sharedAccounts, []),
     monthlyReports: safeJSON(meta.monthlyReports, []),
     archivedLog: safeJSON(meta.archivedLog, []),
@@ -443,18 +574,34 @@ async function loadData(db) {
   if (dirty) await saveData(db, data);
   return data;
 }
-async function defaultData() {
+/* GitHub 备份用：整份数据（所有用户 + 全局配置）。备份文件里不含任何密码哈希，
+   见 strippedBackupDataV2。 */
+async function loadAllData(db) {
+  await ensureSchema(db);
+  await ensureUsers(db);
+  const users = await listUsers(db);
+  const userData = {};
+  for (const u of users) userData[u.id] = await loadData(db, u.id);
+  const gbRow = await db.prepare("SELECT value FROM meta WHERE key = 'githubBackup'").first();
+  return { users, userData, githubBackup: gbRow ? safeJSON(gbRow.value, {}) : {} };
+}
+async function defaultData(adminId) {
   return {
+    userId: adminId,
     username: 'jason',
     passwordHash: await hashPassword('jason123'),
     passwordIsDefault: true,
+    isAdmin: true,
+    banned: false,
+    createdAt: cstDateTime(),
+    lastLoginAt: '',
     xp: 0,
     achievements: {},
     flags: {},
     history: {},
     services: [
       {
-        id: randomBytes(12).toString('hex'),
+        id: 'aa0000000001',
         name: '示例 · 某签到中转站',
         category: 'checkin',
         url: 'https://example.com',
@@ -470,7 +617,7 @@ async function defaultData() {
         sortOrder: 0
       },
       {
-        id: randomBytes(12).toString('hex'),
+        id: 'aa0000000002',
         name: '示例 · 一台 VPS',
         category: 'vps',
         url: '',
@@ -489,11 +636,13 @@ async function defaultData() {
     notes: []
   };
 }
-/* saveData：把整盘数据写回 D1。免费套餐每请求最多 50 条查询，所以不用“一服务一条
-   语句”的写法，改成多行 INSERT 合并：meta 1 条、services 每 40 行 1 条、
-   notes 1 条，再加两条 NOT IN 清理被删掉的行；56 个服务一共约 6 条语句。
-   每条语句最多 100 个绑定参数：services 每行 2 个参数 → 40 行一批（80 个），
-   notes 每行 5 个参数 → 16 行一批（80 个）。 */
+/* saveData：把这一个用户的数据写回 D1（只动他自己的行，别人的不动）。
+   账号字段只更新用户自己能改的那些（用户名/密码哈希/TOTP/API 令牌/最后登录），
+   isAdmin / banned / createdAt 由管理员接口直接改表，不在这里动，免得并发
+   写回把管理员的操作覆盖掉。GitHub 备份是全局配置，只有管理员保存时才写回。
+   免费套餐每请求最多 50 条查询：meta 1 条、services 每 30 行 1 条（3 列 × 30 =
+   90 个绑定参数）、notes 每 16 行 1 条（6 列 × 16 = 96 个），再加清理语句；
+   56 个服务一共约 7 条语句。 */
 function chunkedInsertOrReplace(table, cols, rows, perStmt) {
   const stmts = [];
   for (let i = 0; i < rows.length; i += perStmt) {
@@ -507,82 +656,91 @@ function chunkedInsertOrReplace(table, cols, rows, perStmt) {
   return stmts;
 }
 async function saveData(db, data) {
+  const uid = data.userId;
+  if (!uid) throw new Error('saveData: 缺 userId');
+  await db.prepare('UPDATE users SET username = ?, passwordHash = ?, passwordIsDefault = ?, totpSecret = ?, totpEnabled = ?, apiToken = ?, lastLoginAt = ? WHERE id = ?')
+    .bind(String(data.username || ''), String(data.passwordHash || ''), data.passwordIsDefault ? 1 : 0, String(data.totpSecret || ''), data.totpEnabled ? 1 : 0, String(data.apiToken || ''), String(data.lastLoginAt || ''), uid).run();
   const metaEntries = [
-    ['username', String(data.username || 'jason')],
-    ['passwordHash', String(data.passwordHash || '')],
-    ['passwordIsDefault', JSON.stringify(data.passwordIsDefault !== false)],
     ['xp', String(data.xp || 0)],
     ['achievements', JSON.stringify(data.achievements || {})],
     ['flags', JSON.stringify(data.flags || {})],
     ['history', JSON.stringify(data.history || {})],
     ['categories', JSON.stringify(Array.isArray(data.categories) ? data.categories : [])],
     ['notify', JSON.stringify(data.notify || {})],
-    ['githubBackup', JSON.stringify(data.githubBackup || {})],
-    ['totpEnabled', JSON.stringify(!!data.totpEnabled)],
-    /* v65 */
     ['sharedAccounts', JSON.stringify(Array.isArray(data.sharedAccounts) ? data.sharedAccounts : [])],
     ['monthlyReports', JSON.stringify(Array.isArray(data.monthlyReports) ? data.monthlyReports.slice(-12) : [])],
     ['archivedLog', JSON.stringify(Array.isArray(data.archivedLog) ? data.archivedLog.slice(-50) : [])],
     ['loginHistory', JSON.stringify(Array.isArray(data.loginHistory) ? data.loginHistory.slice(-50) : [])]
-  ];
-  if (data.apiToken) metaEntries.push(['apiToken', data.apiToken]);
-  if (data.totpSecret) metaEntries.push(['totpSecret', data.totpSecret]);
+  ].map(([k, v]) => [userMetaKey(uid, k), v]);
   const stmts = chunkedInsertOrReplace('meta', ['key', 'value'], metaEntries, 40);
-  if (!data.apiToken) stmts.push({ sql: 'DELETE FROM meta WHERE key = ?', args: ['apiToken'] });
-  if (!data.totpSecret) stmts.push({ sql: 'DELETE FROM meta WHERE key = ?', args: ['totpSecret'] });
-  const svcRows = (data.services || []).map((s) => [s.id, JSON.stringify(s)]);
-  stmts.push(...chunkedInsertOrReplace('services', ['id', 'data'], svcRows, 40));
-  if (svcRows.length) {
-    stmts.push({ sql: `DELETE FROM services WHERE id NOT IN (${svcRows.map(() => '?').join(',')})`, args: svcRows.map((r) => r[0]) });
-  } else {
-    stmts.push({ sql: 'DELETE FROM services', args: [] });
+  /* GitHub 备份是全局配置，只有管理员保存时才写回（普通用户不碰它） */
+  if (data.isAdmin) {
+    stmts.push({ sql: 'INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', args: ['githubBackup', JSON.stringify(data.githubBackup || {})] });
   }
-  const noteRows = (data.notes || []).map((n) => [n.id, n.title, n.content, n.createdAt, n.updatedAt]);
-  stmts.push(...chunkedInsertOrReplace('notes', ['id', 'title', 'content', 'createdAt', 'updatedAt'], noteRows, 16));
-  if (noteRows.length) {
-    stmts.push({ sql: `DELETE FROM notes WHERE id NOT IN (${noteRows.map(() => '?').join(',')})`, args: noteRows.map((r) => r[0]) });
+  const svcRows = (data.services || []).map((s) => [s.id, JSON.stringify(s), uid]);
+  stmts.push(...chunkedInsertOrReplace('services', ['id', 'data', 'userId'], svcRows, 30));
+  if (svcRows.length) {
+    stmts.push({ sql: `DELETE FROM services WHERE userId = ? AND id NOT IN (${svcRows.map(() => '?').join(',')})`, args: [uid, ...svcRows.map((r) => r[0])] });
   } else {
-    stmts.push({ sql: 'DELETE FROM notes', args: [] });
+    stmts.push({ sql: 'DELETE FROM services WHERE userId = ?', args: [uid] });
+  }
+  const noteRows = (data.notes || []).map((n) => [n.id, n.title, n.content, n.createdAt, n.updatedAt, uid]);
+  stmts.push(...chunkedInsertOrReplace('notes', ['id', 'title', 'content', 'createdAt', 'updatedAt', 'userId'], noteRows, 16));
+  if (noteRows.length) {
+    stmts.push({ sql: `DELETE FROM notes WHERE userId = ? AND id NOT IN (${noteRows.map(() => '?').join(',')})`, args: [uid, ...noteRows.map((r) => r[0])] });
+  } else {
+    stmts.push({ sql: 'DELETE FROM notes WHERE userId = ?', args: [uid] });
   }
   for (const s of stmts) {
     await db.prepare(s.sql).bind(...s.args).run();
   }
 }
-/* 会话：D1 存 token + 创建时间，30 天有效 */
+/* 会话：D1 存 token + 创建时间 + 所属用户，30 天有效 */
 async function currentUser(request, db) {
   const token = parseCookies(request.headers.get('cookie')).session;
   if (!token) return null;
-  const row = await db.prepare('SELECT created FROM sessions WHERE token = ?').bind(token).first();
+  const row = await db.prepare('SELECT userId, created FROM sessions WHERE token = ?').bind(token).first();
   if (!row || Date.now() - row.created > SESSION_MS) return null;
-  return { token };
+  let userId = row.userId;
+  if (!userId) {
+    /* 老会话没有 userId（v67 之前建的）：默认归管理员，并补写 userId */
+    const admin = await getAdminUser(db);
+    if (!admin) return null;
+    userId = admin.id;
+    await db.prepare('UPDATE sessions SET userId = ? WHERE token = ?').bind(userId, token).run();
+  }
+  const user = await getUserById(db, userId);
+  if (!user || user.banned) return null; /* 账号被封禁后，已有的会话也失效 */
+  return { token, userId, user };
 }
-async function createSession(db) {
+async function createSession(db, userId) {
   const token = randomBytes(32).toString('hex');
-  await db.prepare('INSERT INTO sessions (token, created) VALUES (?, ?)').bind(token, Date.now()).run();
+  await db.prepare('INSERT INTO sessions (token, created, userId) VALUES (?, ?, ?)').bind(token, Date.now(), userId).run();
   await db.prepare('DELETE FROM sessions WHERE created < ?').bind(Date.now() - SESSION_MS).run();
   return token;
 }
 async function deleteSession(db, token) {
   await db.prepare('DELETE FROM sessions WHERE token = ?').bind(token).run();
 }
-/* v59：API 令牌（给 iOS 快捷指令用）——只放行签到那两个接口 */
-async function isApiToken(request, db) {
+/* v59：API 令牌（给 iOS 快捷指令用）——只放行签到那两个接口。
+   v67：令牌是每个用户自己的，返回令牌所属用户（封禁用户的令牌失效）。 */
+async function apiTokenUser(request, db) {
   const h = request.headers.get('authorization') || '';
   const m = h.match(/^Bearer\s+(\S+)$/i);
   let tok = m ? m[1] : '';
   if (!tok) {
     try { tok = new URL(request.url).searchParams.get('token') || ''; } catch { tok = ''; }
   }
-  if (!tok) return false;
-  const row = await db.prepare("SELECT value FROM meta WHERE key = 'apiToken'").bind().first();
-  return !!row && row.value === tok;
+  if (!tok) return null;
+  const row = await db.prepare('SELECT id, username, banned FROM users WHERE apiToken = ?').bind(tok).first();
+  if (!row || row.banned) return null;
+  return { userId: row.id, user: row };
 }
 function isTokenAllowedEndpoint(pathname, method) {
   if (method !== 'POST') return false;
   if (pathname === '/api/checkins/all') return true;
   return /^\/api\/services\/[0-9a-f]+\/checkin$/.test(pathname);
 }
-
 /* ---------- 多账号 ---------- */
 function sanitizeAccount(a) {
   if (!a || typeof a !== 'object') return null;
@@ -1046,9 +1204,9 @@ function checkinLines(todo) {
   return lines;
 }
 /* 每小时检查一次；北京时间 9 点后才发（默认，设置里可改）。每天每种最多发一次。 */
-async function runNotifyChecks(db) {
+async function runNotifyChecks(db, userId) {
   try {
-    const data = await loadData(db);
+    const data = await loadData(db, userId);
     const n = notifyCfg(data);
     if (!(n.token && n.chatId) && !n.webhookUrl && !n.barkKey && !n.serverChanKey) return;
     const prevNotify = { lastExpiring: n.lastExpiring, lastCheckin: n.lastCheckin, lastCheckinRepeatAt: n.lastCheckinRepeatAt };
@@ -1096,7 +1254,7 @@ async function runNotifyChecks(db) {
     }
     if (dirty) {
       /* 写回前重读：这一小时里用户可能改过数据，只合并提醒自己改的日期字段 */
-      const fresh = await loadData(db);
+      const fresh = await loadData(db, userId);
       const fn = notifyCfg(fresh);
       for (const k of ['lastExpiring', 'lastCheckin', 'lastCheckinRepeatAt']) {
         if (n[k] !== undefined && n[k] !== prevNotify[k]) fn[k] = n[k];
@@ -1146,9 +1304,9 @@ function mergePollWrites(cur, mutated, snap) {
   for (const [k, v] of Object.entries(mf)) if (JSON.stringify(v) !== JSON.stringify(snap.flags[k])) cur.flags[k] = v;
   return cur;
 }
-async function pollBotCommands(db) {
+async function pollBotCommands(db, userId) {
   try {
-    const data = await loadData(db);
+    const data = await loadData(db, userId);
     const n = notifyCfg(data);
     if (!n.token || !n.chatId) return;
     const snap = snapshotPollState(data);
@@ -1159,7 +1317,7 @@ async function pollBotCommands(db) {
     if (!j.ok || !Array.isArray(j.result)) return;
     if (n.tgSeen === undefined) {
       n.tgSeen = j.result.reduce((m, u) => Math.max(m, u.update_id || 0), 0);
-      await saveData(db, mergePollWrites(await loadData(db), data, snap));
+      await saveData(db, mergePollWrites(await loadData(db, userId), data, snap));
       return;
     }
     const fresh = j.result.filter((u) => (u.update_id || 0) > n.tgSeen);
@@ -1209,7 +1367,7 @@ async function pollBotCommands(db) {
         await send(`⏰ <b>临期服务</b> · ${t}\n${body}`);
       }
     }
-    await saveData(db, mergePollWrites(await loadData(db), data, snap));
+    await saveData(db, mergePollWrites(await loadData(db, userId), data, snap));
   } catch (e) { console.error('[!] TG 命令轮询异常:', e.message); }
 }
 
@@ -1258,9 +1416,9 @@ async function checkCertExpiry(host) {
     return new Date(best).toISOString().slice(0, 10); // YYYY-MM-DD
   } catch { return null; }
 }
-async function checkLinks(db) {
+async function checkLinks(db, userId) {
   try {
-    const data = await loadData(db);
+    const data = await loadData(db, userId);
     const t = todayStr();
     const now = Date.now();
     const results = await Promise.all(data.services.map(async (s) => ({ id: s.id, st: await probeLink(s.url) })));
@@ -1287,7 +1445,7 @@ async function checkLinks(db) {
       const outs = await Promise.all(batch.map((h) => checkCertExpiry(h)));
       batch.forEach((h, j) => certResults.set(h, outs[j]));
     }
-    const fresh = await loadData(db);
+    const fresh = await loadData(db, userId);
     let changed = false;
     for (const { id, st } of results) {
       const s = fresh.services.find((x) => x.id === id);
@@ -1338,9 +1496,9 @@ async function tryAutoSignin(svc, cfg) {
     return { ok: false, status: 0, note: e.name === 'AbortError' ? '请求超时（15 秒）' : (e.message || '请求失败') };
   }
 }
-async function runAutoSignins(db) {
+async function runAutoSignins(db, userId) {
   try {
-    const data = await loadData(db);
+    const data = await loadData(db, userId);
     const t = todayStr();
     const due = checkinCohort(data, t);
     const results = [];
@@ -1372,9 +1530,9 @@ function prevMonthStr() {
   const d = new Date(Date.UTC(y, m - 2, 1));
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
 }
-async function runMonthlyReport(db, force) {
+async function runMonthlyReport(db, userId, force) {
   try {
-    const data = await loadData(db);
+    const data = await loadData(db, userId);
     const ym = prevMonthStr();
     if (!Array.isArray(data.monthlyReports)) data.monthlyReports = [];
     if (data.monthlyReports.some((r) => r && r.month === ym)) return { ok: true, skipped: true, month: ym };
@@ -1398,9 +1556,9 @@ async function runMonthlyReport(db, force) {
    “已归档”分类（不存在就新建，图标 🗄️）；归档记录记在 meta.archivedLog 里。
    归档的服务不计入签到队列/临期提醒/Telegram 提醒（dailyServices 和 expiringList
    里已经排除了）；用户手动把分类改回去就恢复正常。 */
-async function runAutoArchive(db) {
+async function runAutoArchive(db, userId) {
   try {
-    const data = await loadData(db);
+    const data = await loadData(db, userId);
     const t = todayStr();
     const cats = ensureCategories(data);
     let archivedCat = cats.find((c) => c.id === ARCHIVED_CAT.id);
@@ -1425,12 +1583,20 @@ async function runAutoArchive(db) {
   } catch (e) { console.error('[!] 自动归档异常:', e.message); return { ok: false, note: e.message }; }
 }
 
-/* ---------- GitHub 自动备份 ---------- */
-function strippedBackupData(data) {
+/* ---------- GitHub 自动备份（v67：整份数据，所有用户） ---------- */
+/* 一个用户的备份数据（去掉登录密码哈希、API 令牌、TOTP 密钥、通知渠道密钥、
+   自动签到请求头）。users 表里的账号字段不在这里，备份文件里不含任何密码哈希。 */
+function strippedUserBackup(data) {
   const out = { ...data };
+  delete out.userId;
+  delete out.username;
   delete out.passwordHash;
   delete out.apiToken;
   delete out.totpSecret;
+  delete out.isAdmin;
+  delete out.banned;
+  delete out.createdAt;
+  delete out.lastLoginAt;
   out.services = (data.services || []).map((s) => {
     if (!s.autoSignin) return s;
     return { ...s, autoSignin: { ...s.autoSignin, headers: {} } };
@@ -1440,16 +1606,91 @@ function strippedBackupData(data) {
   delete out.notify.webhookUrl;
   delete out.notify.barkKey;
   delete out.notify.serverChanKey;
-  out.githubBackup = { ...(data.githubBackup || {}) };
-  delete out.githubBackup.token;
+  delete out.githubBackup; /* 全局配置只在顶层放一份 */
   return out;
+}
+/* v2 备份格式：{ version: 2, exportedAt, users: [账号信息（无密码哈希）],
+   userData: { userId: 该用户的业务数据 }, githubBackup: {配置（无 Token）} } */
+function strippedBackupDataV2(all) {
+  const userData = {};
+  for (const [uid, d] of Object.entries(all.userData || {})) userData[uid] = strippedUserBackup(d);
+  const gb = { ...(all.githubBackup || {}) };
+  delete gb.token;
+  return {
+    version: 2,
+    exportedAt: cstDateTime(),
+    users: (all.users || []).map(publicUser),
+    userData,
+    githubBackup: gb
+  };
+}
+/* 把一份备份里的单个用户业务数据映射回 data 对象（服务逐字段清洗，分类、
+   历史、经验、共享账号库、月度报告、归档记录、登录历史都恢复；通知渠道的
+   密钥不覆盖（留着当前配好的），账号（users/invite_codes）不动）。
+   v1 旧备份（顶层就是 services）和 v2 备份里的 userData[uid] 都走这里。 */
+function restoreUserData(data, imp) {
+  const cats = Array.isArray(imp.categories) && imp.categories.length
+    ? imp.categories.filter((c) => c && typeof c.id === 'string' && typeof c.label === 'string' && c.label.trim())
+    : categoriesOf(data);
+  const catIds = new Set(cats.map((c) => c.id));
+  const seen = new Set();
+  data.services = imp.services.filter((s) => { if (seen.has(String(s.id))) return false; seen.add(String(s.id)); return true; }).map((s) => ({
+    id: String(s.id),
+    name: String(s.name).slice(0, 100),
+    category: catIds.has(s.category) ? s.category : 'relay',
+    url: String(s.url || '').slice(0, 500),
+    account: String(s.account || '').slice(0, 500),
+    secret: String(s.secret || '').slice(0, 500),
+    price: String(s.price || '').slice(0, 500),
+    notes: String(s.notes || '').slice(0, 500),
+    registeredAt: String(s.registeredAt || ''),
+    expiresAt: String(s.expiresAt || ''),
+    checkinFrequency: s.checkinFrequency === 'daily' ? 'daily' : 'none',
+    checkinEveryDays: clampInt(s.checkinEveryDays, 1, 365, 1),
+    renewDays: clampInt(s.renewDays, 1, 3650, 365),
+    favorite: !!s.favorite,
+    abnormal: !!s.abnormal,
+    accounts: (Array.isArray(s.accounts) ? s.accounts : []).map(sanitizeAccount).filter(Boolean).slice(0, 20),
+    checkins: Array.isArray(s.checkins) ? s.checkins.filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)) : [],
+    visits: Number(s.visits) || 0,
+    sortOrder: Number(s.sortOrder) || 0,
+    linkStatus: s.linkStatus,
+    linkHistory: (Array.isArray(s.linkHistory) ? s.linkHistory : []).filter((h) => h && typeof h.t === 'number' && typeof h.ok === 'boolean').slice(-120),
+    /* v65：证书到期日和检查日期也随备份恢复 */
+    certExpiresAt: (/^\d{4}-\d{2}-\d{2}$/.test(String(s.certExpiresAt || ''))) ? String(s.certExpiresAt) : undefined,
+    certCheckedAt: (/^\d{4}-\d{2}-\d{2}$/.test(String(s.certCheckedAt || ''))) ? String(s.certCheckedAt) : undefined,
+    renewHistory: (Array.isArray(s.renewHistory) ? s.renewHistory : []).filter((h) => h && /^\d{4}-\d{2}-\d{2}$/.test(h.at || '') && typeof h.from === 'string' && typeof h.to === 'string').slice(-20),
+    tags: (Array.isArray(s.tags) ? s.tags : []).map((t) => String(t).trim().slice(0, 20)).filter(Boolean).slice(0, 10),
+    customFields: sanitizeCustomFields(s.customFields),
+    autoSignin: sanitizeAutoSignin(s.autoSignin),
+    autoSigninLast: (s.autoSigninLast && typeof s.autoSigninLast === 'object') ? { at: String(s.autoSigninLast.at || '').slice(0, 30), ok: !!s.autoSigninLast.ok, status: Number(s.autoSigninLast.status) || 0, note: String(s.autoSigninLast.note || '').slice(0, 200) } : undefined
+  }));
+  data.services.forEach(normalizeAccounts);
+  data.categories = cats.map((c) => ({ id: c.id, label: String(c.label).slice(0, 20), icon: cleanIcon(c.icon), cls: c.cls || 't-custom' }));
+  if (imp.history && typeof imp.history === 'object') data.history = imp.history;
+  if (imp.achievements && typeof imp.achievements === 'object') data.achievements = imp.achievements;
+  if (Number(imp.xp) >= 0) data.xp = Number(imp.xp);
+  if (imp.flags && typeof imp.flags === 'object') data.flags = imp.flags;
+  /* v65：备份里带回来的共享账号库、月度报告、归档记录、登录历史也一并恢复 */
+  if (Array.isArray(imp.sharedAccounts)) data.sharedAccounts = imp.sharedAccounts.map(sanitizeVaultAccount).filter(Boolean).slice(0, 200);
+  if (Array.isArray(imp.monthlyReports)) data.monthlyReports = imp.monthlyReports.filter((r) => r && typeof r.month === 'string').slice(-12);
+  if (Array.isArray(imp.archivedLog)) data.archivedLog = imp.archivedLog.filter((r) => r && typeof r.id === 'string').slice(-50);
+  if (Array.isArray(imp.loginHistory)) data.loginHistory = imp.loginHistory.filter((r) => r && typeof r.at === 'string').slice(-50);
+  if (imp.notify && typeof imp.notify === 'object') {
+    const n = notifyCfg(data);
+    const keep = { token: n.token, webhookUrl: n.webhookUrl, barkKey: n.barkKey, serverChanKey: n.serverChanKey };
+    Object.assign(n, imp.notify);
+    for (const k of ['token', 'webhookUrl', 'barkKey', 'serverChanKey']) {
+      if (keep[k]) n[k] = keep[k]; else delete n[k];
+    }
+  }
 }
 async function pushGithubBackup(db) {
   try {
-    const data = await loadData(db);
-    const gb = data.githubBackup || {};
+    const all = await loadAllData(db);
+    const gb = all.githubBackup || {};
     if (!gb.token || !gb.repo || !/^[^/\s]+\/[^/\s]+$/.test(gb.repo)) return null;
-    const content = JSON.stringify(strippedBackupData(data), null, 2);
+    const content = JSON.stringify(strippedBackupDataV2(all), null, 2);
     const hash = createHash('sha256').update(content).digest('hex');
     if (gb.lastHash === hash) return { ok: true, skipped: true };
     const branch = gb.branch || 'main';
@@ -1561,6 +1802,11 @@ async function handleAPI(request, env, pathname) {
   const method = request.method;
   const send = (status, obj, headers) => jsonResponse(status, obj, headers);
 
+  /* v67：所有 API 入口先保证表结构存在（ensureSchema 内部有 promise 缓存，
+     每个 isolate 只跑一次 DDL）。没有这一步，全新 D1 上第一个 /api/captcha
+     或 /api/login 请求会因为 captchas/login_throttle/users 表不存在而 500。 */
+  await ensureSchema(db);
+
   if (pathname === '/api/healthz' && method === 'GET') {
     return send(200, { ok: true, runtime: 'workers' });
   }
@@ -1579,21 +1825,64 @@ async function handleAPI(request, env, pathname) {
     if (!(await verifyCaptcha(db, body.captchaId, body.captcha))) {
       return send(400, { error: '验证码不对或已过期，请重新输入' });
     }
-    const data = await loadData(db);
-    if (body.username !== data.username || !(await verifyPassword(body.password, data.passwordHash))) {
+    /* v67 多用户：按用户名找账号（查不到和密码不对都回同一个 401，不泄露账号是否存在）；
+       密码对了但被封禁才回“账号已被封禁” */
+    await ensureUsers(db);
+    const user = await getUserByUsername(db, String(body.username || '').trim());
+    if (!user || !(await verifyPassword(body.password, user.passwordHash))) {
       return send(401, { error: '用户名或密码不对' });
     }
-    if (data.totpEnabled && data.totpSecret) {
+    if (user.banned) return send(401, { error: '账号已被封禁，请联系管理员' });
+    if (user.totpEnabled && user.totpSecret) {
       if (!body.totp) return send(401, { error: 'need_totp' });
-      if (!(await verifyTotp(data.totpSecret, body.totp))) return send(401, { error: '二次验证失败' });
+      if (!(await verifyTotp(user.totpSecret, body.totp))) return send(401, { error: '二次验证失败' });
     }
-    const token = await createSession(db);
+    const token = await createSession(db, user.id);
+    const data = await loadData(db, user.id);
+    data.lastLoginAt = cstDateTime();
     /* v65：登录成功记一条登录历史；IP 和上次不同时发异地提醒（在 recordLogin 里） */
     await recordLogin(db, data, request);
     /* Workers 线上永远是 HTTPS，给 Cookie 加 Secure；本地 wrangler dev 是 http，
        加了 Secure 浏览器/curl 反而不会把 Cookie 发回来，所以只在 https 请求上加 */
     const secure = new URL(request.url).protocol === 'https:' ? '; Secure' : '';
-    return send(200, { ok: true, username: data.username }, {
+    return send(200, { ok: true, username: user.username, isAdmin: !!user.isAdmin }, {
+      'Set-Cookie': `session=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${SESSION_MS / 1000}${secure}`
+    });
+  }
+
+  /* v67：注册——除第一个默认用户外，注册必须提供邀请码（一个码只能用一次，
+     用完即消耗）。注册也要过图形验证码，免得机器人拿着码批量刷号。
+     注册成功直接登录（发会话 Cookie），不用再登一次。 */
+  if (pathname === '/api/register' && method === 'POST') {
+    const ip = clientIp(request);
+    if (await loginThrottled(db, ip)) {
+      return send(429, { error: '尝试太频繁，请 10 分钟后再试' });
+    }
+    const body = await jsonBody(request);
+    if (!(await verifyCaptcha(db, body.captchaId, body.captcha))) {
+      return send(400, { error: '验证码不对或已过期，请重新输入' });
+    }
+    const username = String(body.username || '').trim();
+    const password = String(body.password || '');
+    const code = String(body.inviteCode || '').trim().toUpperCase();
+    if (!validUsername(username)) return send(400, { error: '用户名不对（2–32 位，字母/数字/中文/下划线）' });
+    if (!password || password.length < 6) return send(400, { error: '密码至少 6 位' });
+    if (!code) return send(400, { error: '请填写邀请码' });
+    await ensureUsers(db);
+    if (await getUserByUsername(db, username)) return send(400, { error: '这个用户名已经被用了' });
+    const inv = await db.prepare('SELECT * FROM invite_codes WHERE code = ?').bind(code).first();
+    if (!inv) return send(400, { error: '邀请码不对' });
+    if (inv.usedBy) return send(400, { error: '这个邀请码已经用过了' });
+    const id = randomBytes(6).toString('hex');
+    await db.prepare('INSERT INTO users (id, username, passwordHash, passwordIsDefault, isAdmin, banned, createdAt, lastLoginAt, totpSecret, totpEnabled, apiToken) VALUES (?, ?, ?, 0, 0, 0, ?, ?, ?, 0, ?)')
+      .bind(id, username, await hashPassword(password), cstDateTime(), '', '', '').run();
+    await db.prepare('UPDATE invite_codes SET usedBy = ?, usedAt = ? WHERE code = ?').bind(id, cstDateTime(), code).run();
+    const token = await createSession(db, id);
+    const data = await loadData(db, id);
+    data.lastLoginAt = cstDateTime();
+    await recordLogin(db, data, request);
+    const secure = new URL(request.url).protocol === 'https:' ? '; Secure' : '';
+    return send(200, { ok: true, username, isAdmin: false }, {
       'Set-Cookie': `session=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${SESSION_MS / 1000}${secure}`
     });
   }
@@ -1631,13 +1920,17 @@ async function handleAPI(request, env, pathname) {
     });
   }
 
-  /* v62：浏览器扩展按域名取账号——登录会话或 API 令牌都认 */
+  /* v62：浏览器扩展按域名取账号——登录会话或 API 令牌都认（v67：只返回令牌/会话
+     所属用户自己的账号） */
   if (pathname === '/api/accounts/by-domain' && method === 'GET') {
-    if (!(await currentUser(request, db)) && !(await isApiToken(request, db))) return send(401, { error: '未登录' });
+    const byAuth = await currentUser(request, db);
+    const byToken = !byAuth ? await apiTokenUser(request, db) : null;
+    const who = byAuth || byToken;
+    if (!who) return send(401, { error: '未登录' });
     const raw = new URL(request.url).searchParams.get('domain') || '';
     const dom = raw.trim().toLowerCase().replace(/^www\./, '').replace(/:\d+$/, '');
     if (!dom || !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(dom)) return send(400, { error: '域名不对' });
-    const data = await loadData(db);
+    const data = await loadData(db, who.userId);
     const out = [];
     for (const s of data.services) {
       let host = '';
@@ -1652,21 +1945,149 @@ async function handleAPI(request, env, pathname) {
   }
 
   const auth = await currentUser(request, db);
-  const tokenAllowed = !auth && (await isApiToken(request, db)) && isTokenAllowedEndpoint(pathname, method);
+  const tokenUser = !auth ? await apiTokenUser(request, db) : null;
+  const tokenAllowed = !auth && !!tokenUser && isTokenAllowedEndpoint(pathname, method);
   if (!auth && !tokenAllowed) return send(401, { error: '未登录' });
+  /* v67：之后所有业务接口一律按当前登录用户隔离（会话用户或 API 令牌所属用户） */
+  const uid = auth ? auth.userId : tokenUser.userId;
+  const isAdmin = !!(auth && auth.user && auth.user.isAdmin);
+  const requireAdmin = () => {
+    if (!isAdmin) return send(403, { error: '只有管理员能用这个功能' });
+    return null;
+  };
+
+  /* ---------- v67 多用户：改名、邀请码、用户管理 ---------- */
+  /* 自己改用户名：要输当前密码确认，全站唯一，不能重名 */
+  if (pathname === '/api/username' && method === 'POST') {
+    const body = await jsonBody(request);
+    const data = await loadData(db, uid);
+    if (!(await verifyPassword(body.password, data.passwordHash))) return send(401, { error: '密码不对' });
+    const name = String(body.newUsername || body.username || '').trim();
+    if (!validUsername(name)) return send(400, { error: '用户名不对（2–32 位，字母/数字/中文/下划线）' });
+    if (name === data.username) return send(200, { ok: true, username: name });
+    if (await getUserByUsername(db, name)) return send(400, { error: '这个用户名已经被用了' });
+    data.username = name;
+    await saveData(db, data);
+    return send(200, { ok: true, username: name });
+  }
+  /* 邀请码列表（仅管理员）：码、创建时间、是否已用、被谁用了（用户名，注销了就显示 id） */
+  if (pathname === '/api/invite-codes' && method === 'GET') {
+    const denied = requireAdmin();
+    if (denied) return denied;
+    const rows = (await db.prepare('SELECT * FROM invite_codes ORDER BY createdAt DESC').all()).results || [];
+    const users = await listUsers(db);
+    const nameById = new Map(users.map((u) => [u.id, u.username]));
+    return send(200, {
+      codes: rows.map((c) => ({
+        code: c.code, createdAt: c.createdAt || '',
+        used: !!c.usedBy, usedBy: c.usedBy ? (nameById.get(c.usedBy) || '已注销') : '', usedAt: c.usedAt || ''
+      }))
+    });
+  }
+  /* 生成一个邀请码（仅管理员）：HUB-XXXX-XXXX-XXXX，只能用一次 */
+  if (pathname === '/api/invite-codes' && method === 'POST') {
+    const denied = requireAdmin();
+    if (denied) return denied;
+    const code = genInviteCode();
+    await db.prepare('INSERT INTO invite_codes (code, createdAt, usedBy, usedAt) VALUES (?, ?, ?, ?)')
+      .bind(code, cstDateTime(), '', '').run();
+    return send(200, { ok: true, code, createdAt: cstDateTime() });
+  }
+  /* 作废一个未用的邀请码（仅管理员）：已用过的不能作废，留着当记录 */
+  const revokeMatch = pathname.match(/^\/api\/invite-codes\/([A-Z0-9-]+)\/revoke$/);
+  if (revokeMatch && method === 'POST') {
+    const denied = requireAdmin();
+    if (denied) return denied;
+    const row = await db.prepare('SELECT * FROM invite_codes WHERE code = ?').bind(revokeMatch[1]).first();
+    if (!row) return send(404, { error: '找不到这个邀请码' });
+    if (row.usedBy) return send(400, { error: '这个邀请码已经用过了，不能作废' });
+    await db.prepare('DELETE FROM invite_codes WHERE code = ?').bind(revokeMatch[1]).run();
+    return send(200, { ok: true });
+  }
+  /* 用户列表（仅管理员）：只返回账号信息，绝不返回任何用户的服务数据 */
+  if (pathname === '/api/admin/users' && method === 'GET') {
+    const denied = requireAdmin();
+    if (denied) return denied;
+    return send(200, { users: (await listUsers(db)).map(publicUser) });
+  }
+  /* 管理员直接建用户（不用邀请码；密码留空=自动生成 12 位临时密码，只返回一次，
+     初始密码是默认密码，下次登录提示改） */
+  if (pathname === '/api/admin/users' && method === 'POST') {
+    const denied = requireAdmin();
+    if (denied) return denied;
+    const body = await jsonBody(request);
+    const username = String(body.username || '').trim();
+    let password = String(body.password || '');
+    let tempPassword = null;
+    if (!password) {
+      /* 留空=自动生成：无歧义字母数字，12 位 */
+      const chars = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+      tempPassword = '';
+      for (let i = 0; i < 12; i++) tempPassword += chars[Math.floor(Math.random() * chars.length)];
+      password = tempPassword;
+    }
+    if (!validUsername(username)) return send(400, { error: '用户名不对（2–32 位，字母/数字/中文/下划线）' });
+    if (password.length < 6) return send(400, { error: '密码至少 6 位' });
+    if (await getUserByUsername(db, username)) return send(400, { error: '这个用户名已经被用了' });
+    const id = randomBytes(6).toString('hex');
+    await db.prepare('INSERT INTO users (id, username, passwordHash, passwordIsDefault, isAdmin, banned, createdAt, lastLoginAt, totpSecret, totpEnabled, apiToken) VALUES (?, ?, ?, 1, 0, 0, ?, ?, ?, 0, ?)')
+      .bind(id, username, await hashPassword(password), cstDateTime(), '', '', '').run();
+    return send(200, { ok: true, id, username, tempPassword });
+  }
+  const adminUserMatch = pathname.match(/^\/api\/admin\/users\/([0-9a-f]+)(\/reset-password|\/rename|\/ban|\/unban)?$/);
+  if (adminUserMatch) {
+    const denied = requireAdmin();
+    if (denied) return denied;
+    const targetId = adminUserMatch[1];
+    const action = adminUserMatch[2] || '';
+    const target = await getUserById(db, targetId);
+    if (!target) return send(404, { error: '找不到这个用户' });
+    /* 删用户：删账号及该用户全部数据（需前端二次确认），不能删自己 */
+    if (!action && method === 'DELETE') {
+      if (targetId === uid) return send(400, { error: '不能删除自己的账号' });
+      await deleteUserData(db, targetId);
+      return send(200, { ok: true });
+    }
+    if (action === '/reset-password' && method === 'POST') {
+      /* 重置成一个随机临时密码（只返回一次，管理员转告给用户），
+         passwordIsDefault=true，下次登录提示改密码 */
+      const chars = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+      let tmp = '';
+      for (let i = 0; i < 12; i++) tmp += chars[Math.floor(Math.random() * chars.length)];
+      await db.prepare('UPDATE users SET passwordHash = ?, passwordIsDefault = 1 WHERE id = ?')
+        .bind(await hashPassword(tmp), targetId).run();
+      await db.prepare('DELETE FROM sessions WHERE userId = ?').bind(targetId).run();
+      return send(200, { ok: true, username: target.username, tempPassword: tmp });
+    }
+    if (action === '/rename' && method === 'POST') {
+      const body = await jsonBody(request);
+      const name = String(body.newUsername || body.username || '').trim();
+      if (!validUsername(name)) return send(400, { error: '用户名不对（2–32 位，字母/数字/中文/下划线）' });
+      if (name !== target.username && (await getUserByUsername(db, name))) return send(400, { error: '这个用户名已经被用了' });
+      await db.prepare('UPDATE users SET username = ? WHERE id = ?').bind(name, targetId).run();
+      return send(200, { ok: true, username: name });
+    }
+    if ((action === '/ban' || action === '/unban') && method === 'POST') {
+      if (targetId === uid) return send(400, { error: '不能封禁自己的账号' });
+      await db.prepare('UPDATE users SET banned = ? WHERE id = ?').bind(action === '/ban' ? 1 : 0, targetId).run();
+      /* 封禁后立刻踢掉该用户所有会话；解封不自动恢复会话，得重新登录 */
+      if (action === '/ban') await db.prepare('DELETE FROM sessions WHERE userId = ?').bind(targetId).run();
+      return send(200, { ok: true, banned: action === '/ban' });
+    }
+  }
 
   if (pathname === '/api/api-token/status' && method === 'GET') {
-    const data = await loadData(db);
+    const data = await loadData(db, uid);
     return send(200, { hasToken: !!data.apiToken });
   }
   if (pathname === '/api/api-token' && method === 'POST') {
-    const data = await loadData(db);
+    const data = await loadData(db, uid);
     data.apiToken = randomBytes(24).toString('hex');
     await saveData(db, data);
     return send(200, { ok: true, token: data.apiToken });
   }
   if (pathname === '/api/api-token/revoke' && method === 'POST') {
-    const data = await loadData(db);
+    const data = await loadData(db, uid);
     delete data.apiToken;
     await saveData(db, data);
     return send(200, { ok: true });
@@ -1675,12 +2096,12 @@ async function handleAPI(request, env, pathname) {
      改库里的密码，所有链接的服务读时跟着变（loadData 里解析）；删库里的账号时，
      链接它的服务保留快照，自动变回本地副本。 */
   if (pathname === '/api/vault' && method === 'GET') {
-    const data = await loadData(db);
+    const data = await loadData(db, uid);
     return send(200, { accounts: Array.isArray(data.sharedAccounts) ? data.sharedAccounts : [] });
   }
   if (pathname === '/api/vault' && method === 'POST') {
     const body = await jsonBody(request);
-    const data = await loadData(db);
+    const data = await loadData(db, uid);
     if (!Array.isArray(data.sharedAccounts)) data.sharedAccounts = [];
     const action = String(body.action || '');
     if (action === 'create') {
@@ -1725,32 +2146,37 @@ async function handleAPI(request, env, pathname) {
   }
   /* v65：最近登录——最近 10 条（时间、IP、设备），登录接口不返回历史 */
   if (pathname === '/api/login-history' && method === 'GET') {
-    const data = await loadData(db);
+    const data = await loadData(db, uid);
     const list = (Array.isArray(data.loginHistory) ? data.loginHistory : []).slice(-10).reverse()
       .map((h) => ({ at: h.at || '', ip: h.ip || '', device: parseDevice(h.ua || '') }));
     return send(200, { logins: list });
   }
   /* v65：月度报告——手动生成上月报告（每月 1 号定时也会自动生成） */
   if (pathname === '/api/monthly-report/run' && method === 'POST') {
-    const r = await runMonthlyReport(db, true);
+    const r = await runMonthlyReport(db, uid, true);
     if (!r.ok) return send(500, { error: r.note || '生成失败' });
     if (r.skipped) return send(200, { ok: true, skipped: true, month: r.month });
     return send(200, { ok: true, month: r.month, report: r.report });
   }
   /* v65：到期自动归档——手动跑一次（每天 04:00 UTC 定时也会自动跑） */
   if (pathname === '/api/archive/run' && method === 'POST') {
-    const r = await runAutoArchive(db);
+    const r = await runAutoArchive(db, uid);
     if (!r.ok) return send(500, { error: r.note || '归档失败' });
     return send(200, { ok: true, archived: r.archived || 0, names: r.names || [] });
   }
+  /* v67：GitHub 备份是全局的、管理员配——备份里是所有用户的数据，非管理员一律 403 */
   if (pathname === '/api/github-backup/status' && method === 'GET') {
-    const data = await loadData(db);
+    const denied = requireAdmin();
+    if (denied) return denied;
+    const data = await loadData(db, uid);
     const gb = data.githubBackup || {};
     return send(200, { configured: !!(gb.token && gb.repo), repo: gb.repo || '', branch: gb.branch || 'main', lastAt: gb.lastAt || '', lastOk: !!gb.lastOk, lastNote: gb.lastNote || '' });
   }
   if (pathname === '/api/github-backup/save' && method === 'POST') {
+    const denied = requireAdmin();
+    if (denied) return denied;
     const body = await jsonBody(request);
-    const data = await loadData(db);
+    const data = await loadData(db, uid);
     const gb = data.githubBackup || {};
     const token = String(body.token || '').trim();
     const repo = String(body.repo || '').trim();
@@ -1763,6 +2189,8 @@ async function handleAPI(request, env, pathname) {
     return send(200, { ok: true, configured: !!(gb.token && gb.repo) });
   }
   if (pathname === '/api/github-backup/run' && method === 'POST') {
+    const denied = requireAdmin();
+    if (denied) return denied;
     const r = await pushGithubBackup(db);
     if (!r) return send(400, { error: '还没配好 Token 或仓库' });
     if (r.skipped) return send(200, { ok: true, skipped: true, note: '数据没变，不用推' });
@@ -1770,11 +2198,11 @@ async function handleAPI(request, env, pathname) {
     return send(200, { ok: true });
   }
   if (pathname === '/api/totp/status' && method === 'GET') {
-    const data = await loadData(db);
+    const data = await loadData(db, uid);
     return send(200, { enabled: !!data.totpEnabled });
   }
   if (pathname === '/api/totp/setup' && method === 'POST') {
-    const data = await loadData(db);
+    const data = await loadData(db, uid);
     data.totpSecret = base32Encode(randomBytes(20));
     data.totpEnabled = false;
     await saveData(db, data);
@@ -1784,7 +2212,7 @@ async function handleAPI(request, env, pathname) {
   }
   if (pathname === '/api/totp/enable' && method === 'POST') {
     const body = await jsonBody(request);
-    const data = await loadData(db);
+    const data = await loadData(db, uid);
     if (!data.totpSecret) return send(400, { error: '先点“生成密钥”' });
     if (!(await verifyTotp(data.totpSecret, body.code))) return send(401, { error: '动态码不对，请对一下手机时间' });
     data.totpEnabled = true;
@@ -1793,7 +2221,7 @@ async function handleAPI(request, env, pathname) {
   }
   if (pathname === '/api/totp/disable' && method === 'POST') {
     const body = await jsonBody(request);
-    const data = await loadData(db);
+    const data = await loadData(db, uid);
     if (!(await verifyPassword(body.password, data.passwordHash))) return send(401, { error: '密码不对' });
     if (data.totpEnabled && !(await verifyTotp(data.totpSecret, body.code))) return send(401, { error: '动态码不对' });
     delete data.totpSecret;
@@ -1803,11 +2231,11 @@ async function handleAPI(request, env, pathname) {
   }
 
   if (pathname === '/api/notes' && method === 'GET') {
-    const data = await loadData(db);
+    const data = await loadData(db, uid);
     return send(200, (data.notes || []).slice().sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || '')));
   }
   if (pathname === '/api/notes' && method === 'POST') {
-    const data = await loadData(db);
+    const data = await loadData(db, uid);
     const b = await jsonBody(request);
     const title = String(b.title || '').trim().slice(0, 100);
     const content = String(b.content || '').trim().slice(0, 20000);
@@ -1821,7 +2249,7 @@ async function handleAPI(request, env, pathname) {
   }
   if (pathname.startsWith('/api/notes/') && (method === 'PUT' || method === 'DELETE')) {
     const id = decodeURIComponent(pathname.slice('/api/notes/'.length));
-    const data = await loadData(db);
+    const data = await loadData(db, uid);
     const note = (data.notes || []).find((n) => n.id === id);
     if (!note) return send(404, { error: '找不到这条记事' });
     if (method === 'DELETE') {
@@ -1839,7 +2267,8 @@ async function handleAPI(request, env, pathname) {
   }
 
   if (pathname === '/api/me' && method === 'GET') {
-    return send(200, { username: (await loadData(db)).username });
+    const data = await loadData(db, uid);
+    return send(200, { username: data.username, isAdmin: !!data.isAdmin });
   }
   if (pathname === '/api/logout' && method === 'POST') {
     await deleteSession(db, auth.token);
@@ -1848,7 +2277,7 @@ async function handleAPI(request, env, pathname) {
   }
   if (pathname === '/api/password' && method === 'POST') {
     const body = await jsonBody(request);
-    const data = await loadData(db);
+    const data = await loadData(db, uid);
     if (!(await verifyPassword(body.oldPassword, data.passwordHash))) return send(400, { error: '旧密码不对' });
     if (!body.newPassword || String(body.newPassword).length < 6) return send(400, { error: '新密码至少 6 位' });
     data.passwordHash = await hashPassword(body.newPassword);
@@ -1857,7 +2286,7 @@ async function handleAPI(request, env, pathname) {
     return send(200, { ok: true });
   }
   if (pathname === '/api/notify' && method === 'GET') {
-    const n = notifyCfg(await loadData(db));
+    const n = notifyCfg(await loadData(db, uid));
     return send(200, {
       configured: !!(n.token && n.chatId),
       chatId: n.chatId || '',
@@ -1874,7 +2303,7 @@ async function handleAPI(request, env, pathname) {
   }
   if (pathname === '/api/notify' && method === 'POST') {
     const body = await jsonBody(request);
-    const data = await loadData(db);
+    const data = await loadData(db, uid);
     const n = notifyCfg(data);
     if (typeof body.token === 'string' && body.token.trim()) n.token = body.token.trim().slice(0, 200);
     if (typeof body.chatId === 'string' && body.chatId.trim()) n.chatId = body.chatId.trim().slice(0, 64);
@@ -1899,7 +2328,7 @@ async function handleAPI(request, env, pathname) {
     return send(200, { ok: true, configured: !!(n.token && n.chatId) });
   }
   if (pathname === '/api/notify/test' && method === 'POST') {
-    const data = await loadData(db);
+    const data = await loadData(db, uid);
     const n = notifyCfg(data);
     const hasAny = (n.token && n.chatId) || n.webhookUrl || n.barkKey || n.serverChanKey;
     if (!hasAny) return send(400, { error: '还没设置任何通知渠道（Telegram / Webhook / Bark / Server酱）' });
@@ -1920,12 +2349,12 @@ async function handleAPI(request, env, pathname) {
     return send(200, { ok: true, channels: r.results });
   }
   if (pathname === '/api/linkcheck' && method === 'POST') {
-    const r = await checkLinks(db);
+    const r = await checkLinks(db, uid);
     if (!r) return send(400, { error: '检测失败' });
     return send(200, r);
   }
   if (pathname === '/api/auto-signin/run' && method === 'POST') {
-    const r = await runAutoSignins(db);
+    const r = await runAutoSignins(db, uid);
     if (!r) return send(400, { error: '自动签到失败' });
     return send(200, { ok: true, results: r });
   }
@@ -1938,7 +2367,7 @@ async function handleAPI(request, env, pathname) {
   }
   if (pathname === '/api/categories' && method === 'POST') {
     const body = await jsonBody(request);
-    const data = await loadData(db);
+    const data = await loadData(db, uid);
     const cats = ensureCategories(data);
     const label = String(body.label || '').trim().slice(0, 20);
     if (!label) return send(400, { error: '分类名不能为空' });
@@ -1951,7 +2380,7 @@ async function handleAPI(request, env, pathname) {
   const cm = pathname.match(/^\/api\/categories\/([A-Za-z0-9_-]+)$/);
   if (cm && method === 'PUT') {
     const body = await jsonBody(request);
-    const data = await loadData(db);
+    const data = await loadData(db, uid);
     const cats = ensureCategories(data);
     const cat = cats.find((c) => c.id === cm[1]);
     if (!cat) return send(404, { error: '找不到该分类' });
@@ -1965,7 +2394,7 @@ async function handleAPI(request, env, pathname) {
   }
   if (cm && method === 'DELETE') {
     if (BUILTIN_CATS.has(cm[1])) return send(400, { error: '系统分类不能删除' });
-    const data = await loadData(db);
+    const data = await loadData(db, uid);
     const cats = ensureCategories(data);
     const idx = cats.findIndex((c) => c.id === cm[1]);
     if (idx < 0) return send(404, { error: '找不到该分类' });
@@ -1976,7 +2405,7 @@ async function handleAPI(request, env, pathname) {
     return send(200, { ok: true });
   }
   if (pathname === '/api/notify/resolve' && method === 'POST') {
-    const data = await loadData(db);
+    const data = await loadData(db, uid);
     const n = notifyCfg(data);
     if (!n.token) return send(400, { error: '请先保存 Token' });
     try {
@@ -1994,7 +2423,7 @@ async function handleAPI(request, env, pathname) {
   }
   /* 导出台账：Workers 没有磁盘，直接把 Markdown 当文件下载返回 */
   if (pathname === '/api/export-md' && method === 'POST') {
-    const data = await loadData(db);
+    const data = await loadData(db, uid);
     const md = ledgerMarkdown(data, new URL(request.url).origin);
     return new Response(md, {
       status: 200,
@@ -2006,9 +2435,12 @@ async function handleAPI(request, env, pathname) {
       }, SEC_HEADERS)
     });
   }
+  /* v67：备份下载是整份数据（所有用户），只有管理员能下 */
   if (pathname === '/api/backup' && method === 'GET') {
-    const data = await loadData(db);
-    const out = strippedBackupData(data);
+    const denied = requireAdmin();
+    if (denied) return denied;
+    const all = await loadAllData(db);
+    const out = strippedBackupDataV2(all);
     const fname = `service-hub-backup-${todayStr()}.json`;
     return new Response(JSON.stringify(out, null, 2), {
       status: 200,
@@ -2019,90 +2451,57 @@ async function handleAPI(request, env, pathname) {
       }, SEC_HEADERS)
     });
   }
+  /* v67：恢复也只有管理员能做。v2 备份按用户归属恢复（users/invite_codes 不动，
+     只恢复库里已存在用户的业务数据）；v1 旧备份（顶层就是 services）恢复进
+     当前管理员自己的数据。恢复前先把当前整份数据存一份到 backups 表（只留最近 5 份）。 */
   if (pathname === '/api/backup' && method === 'POST') {
+    const denied = requireAdmin();
+    if (denied) return denied;
     const body = await jsonBody(request);
     const imp = body && body.data ? body.data : body;
-    if (!imp || !Array.isArray(imp.services)) return send(400, { error: '备份文件不对：里面没有服务列表' });
-    for (const s of imp.services) {
-      if (!s || typeof s.id !== 'string' || typeof s.name !== 'string' || !s.name.trim()) {
-        return send(400, { error: '备份文件不对：有服务缺名字或编号' });
+    const isV2 = imp && imp.version === 2 && imp.userData && typeof imp.userData === 'object';
+    if (!isV2 && (!imp || !Array.isArray(imp.services))) return send(400, { error: '备份文件不对：里面没有服务列表' });
+    if (!isV2) {
+      for (const s of imp.services) {
+        if (!s || typeof s.id !== 'string' || typeof s.name !== 'string' || !s.name.trim()) {
+          return send(400, { error: '备份文件不对：有服务缺名字或编号' });
+        }
       }
     }
-    const data = await loadData(db);
-    /* 恢复前先把当前数据存一份到 backups 表（只留最近 5 份） */
+    const allBefore = await loadAllData(db);
     await db.prepare('INSERT INTO backups (createdAt, data) VALUES (?, ?)')
-      .bind(cstDateTime(), JSON.stringify(strippedBackupData(data))).run();
+      .bind(cstDateTime(), JSON.stringify(strippedBackupDataV2(allBefore))).run();
     await db.prepare('DELETE FROM backups WHERE id NOT IN (SELECT id FROM backups ORDER BY id DESC LIMIT 5)').run();
-    const cats = Array.isArray(imp.categories) && imp.categories.length
-      ? imp.categories.filter((c) => c && typeof c.id === 'string' && typeof c.label === 'string' && c.label.trim())
-      : categoriesOf(data);
-    const catIds = new Set(cats.map((c) => c.id));
-    const seen = new Set();
-    data.services = imp.services.filter((s) => { if (seen.has(String(s.id))) return false; seen.add(String(s.id)); return true; }).map((s) => ({
-      id: String(s.id),
-      name: String(s.name).slice(0, 100),
-      category: catIds.has(s.category) ? s.category : 'relay',
-      url: String(s.url || '').slice(0, 500),
-      account: String(s.account || '').slice(0, 500),
-      secret: String(s.secret || '').slice(0, 500),
-      price: String(s.price || '').slice(0, 500),
-      notes: String(s.notes || '').slice(0, 500),
-      registeredAt: String(s.registeredAt || ''),
-      expiresAt: String(s.expiresAt || ''),
-      checkinFrequency: s.checkinFrequency === 'daily' ? 'daily' : 'none',
-      checkinEveryDays: clampInt(s.checkinEveryDays, 1, 365, 1),
-      renewDays: clampInt(s.renewDays, 1, 3650, 365),
-      favorite: !!s.favorite,
-      abnormal: !!s.abnormal,
-      accounts: (Array.isArray(s.accounts) ? s.accounts : []).map(sanitizeAccount).filter(Boolean).slice(0, 20),
-      checkins: Array.isArray(s.checkins) ? s.checkins.filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)) : [],
-      visits: Number(s.visits) || 0,
-      sortOrder: Number(s.sortOrder) || 0,
-      linkStatus: s.linkStatus,
-      linkHistory: (Array.isArray(s.linkHistory) ? s.linkHistory : []).filter((h) => h && typeof h.t === 'number' && typeof h.ok === 'boolean').slice(-120),
-      /* v65：证书到期日和检查日期也随备份恢复 */
-      certExpiresAt: (/^\d{4}-\d{2}-\d{2}$/.test(String(s.certExpiresAt || ''))) ? String(s.certExpiresAt) : undefined,
-      certCheckedAt: (/^\d{4}-\d{2}-\d{2}$/.test(String(s.certCheckedAt || ''))) ? String(s.certCheckedAt) : undefined,
-      renewHistory: (Array.isArray(s.renewHistory) ? s.renewHistory : []).filter((h) => h && /^\d{4}-\d{2}-\d{2}$/.test(h.at || '') && typeof h.from === 'string' && typeof h.to === 'string').slice(-20),
-      tags: (Array.isArray(s.tags) ? s.tags : []).map((t) => String(t).trim().slice(0, 20)).filter(Boolean).slice(0, 10),
-      customFields: sanitizeCustomFields(s.customFields),
-      autoSignin: sanitizeAutoSignin(s.autoSignin),
-      autoSigninLast: (s.autoSigninLast && typeof s.autoSigninLast === 'object') ? { at: String(s.autoSigninLast.at || '').slice(0, 30), ok: !!s.autoSigninLast.ok, status: Number(s.autoSigninLast.status) || 0, note: String(s.autoSigninLast.note || '').slice(0, 200) } : undefined
-    }));
-    data.services.forEach(normalizeAccounts);
-    data.categories = cats.map((c) => ({ id: c.id, label: String(c.label).slice(0, 20), icon: cleanIcon(c.icon), cls: c.cls || 't-custom' }));
-    if (imp.history && typeof imp.history === 'object') data.history = imp.history;
-    if (imp.achievements && typeof imp.achievements === 'object') data.achievements = imp.achievements;
-    if (Number(imp.xp) >= 0) data.xp = Number(imp.xp);
-    if (imp.flags && typeof imp.flags === 'object') data.flags = imp.flags;
-    /* v65：备份里带回来的共享账号库、月度报告、归档记录、登录历史也一并恢复 */
-    if (Array.isArray(imp.sharedAccounts)) data.sharedAccounts = imp.sharedAccounts.map(sanitizeVaultAccount).filter(Boolean).slice(0, 200);
-    if (Array.isArray(imp.monthlyReports)) data.monthlyReports = imp.monthlyReports.filter((r) => r && typeof r.month === 'string').slice(-12);
-    if (Array.isArray(imp.archivedLog)) data.archivedLog = imp.archivedLog.filter((r) => r && typeof r.id === 'string').slice(-50);
-    if (Array.isArray(imp.loginHistory)) data.loginHistory = imp.loginHistory.filter((r) => r && typeof r.at === 'string').slice(-50);
-    if (imp.notify && typeof imp.notify === 'object') {
-      const n = notifyCfg(data);
-      const keep = { token: n.token, webhookUrl: n.webhookUrl, barkKey: n.barkKey, serverChanKey: n.serverChanKey };
-      Object.assign(n, imp.notify);
-      for (const k of ['token', 'webhookUrl', 'barkKey', 'serverChanKey']) {
-        if (keep[k]) n[k] = keep[k]; else delete n[k];
+    if (isV2) {
+      let restored = 0;
+      for (const [uid2, ud] of Object.entries(imp.userData)) {
+        if (!ud || !Array.isArray(ud.services)) continue;
+        const user = await getUserById(db, uid2);
+        if (!user) continue; /* 备份里有、库里没有的用户跳过，不新建账号 */
+        const data = await loadData(db, uid2);
+        restoreUserData(data, ud);
+        await saveData(db, data);
+        restored += data.services.length;
       }
+      return send(200, { ok: true, services: restored });
     }
+    const data = await loadData(db, uid);
+    restoreUserData(data, imp);
     await saveData(db, data);
     return send(200, { ok: true, services: data.services.length });
   }
   if (pathname === '/api/meta' && method === 'GET') {
-    const data = await loadData(db);
+    const data = await loadData(db, uid);
     const unlocked = syncAchievements(data);
     if (unlocked.length) await saveData(db, data);
     return send(200, metaPayload(data));
   }
 
   if (pathname === '/api/services' && method === 'GET') {
-    return send(200, (await loadData(db)).services);
+    return send(200, (await loadData(db, uid)).services);
   }
   if (pathname === '/api/services' && method === 'POST') {
-    const data = await loadData(db);
+    const data = await loadData(db, uid);
     const f = pickFields(await jsonBody(request), null, categoriesOf(data).map((c) => c.id));
     if (!f.name) return send(400, { error: '名称必填' });
     const svc = Object.assign({
@@ -2126,7 +2525,7 @@ async function handleAPI(request, env, pathname) {
     const rows = Array.isArray(body.services) ? body.services : [];
     if (!rows.length) return send(400, { error: '没有可导入的服务' });
     if (rows.length > 500) return send(400, { error: '一次最多导入 500 个' });
-    const data = await loadData(db);
+    const data = await loadData(db, uid);
     const catIds = categoriesOf(data).map((c) => c.id);
     let maxOrder = data.services.reduce((m, s) => Math.max(m, s.sortOrder ?? 0), 0);
     let imported = 0;
@@ -2158,7 +2557,7 @@ async function handleAPI(request, env, pathname) {
     if (!rows.length) return send(400, { error: '没有可导入的书签' });
     if (rows.length > 500) return send(400, { error: '一次最多导入 500 个' });
     const normUrl = (u) => String(u || '').trim().toLowerCase().replace(/\/+$/, '');
-    const data = await loadData(db);
+    const data = await loadData(db, uid);
     const catIds = categoriesOf(data).map((c) => c.id);
     const seenUrls = new Set(data.services.map((s) => normUrl(s.url)).filter(Boolean));
     let maxOrder = data.services.reduce((m, s) => Math.max(m, s.sortOrder ?? 0), 0);
@@ -2193,7 +2592,7 @@ async function handleAPI(request, env, pathname) {
     const rows = Array.isArray(body.accounts) ? body.accounts : [];
     if (!rows.length) return send(400, { error: '没有可导入的账号' });
     if (rows.length > 500) return send(400, { error: '一次最多导入 500 个' });
-    const data = await loadData(db);
+    const data = await loadData(db, uid);
     const byName = new Map();
     for (const s of data.services) {
       const key = String(s.name || '').trim().toLowerCase();
@@ -2228,21 +2627,21 @@ async function handleAPI(request, env, pathname) {
   if (pathname === '/api/reorder' && method === 'POST') {
     const body = await jsonBody(request);
     if (!Array.isArray(body.ids)) return send(400, { error: '参数错误' });
-    const data = await loadData(db);
+    const data = await loadData(db, uid);
     const pos = new Map(body.ids.map((x, i) => [String(x), i]));
     data.services.forEach((s) => { if (pos.has(s.id)) s.sortOrder = pos.get(s.id); });
     await saveData(db, data);
     return send(200, { ok: true });
   }
   if (pathname === '/api/checkins/all' && method === 'POST') {
-    const data = await loadData(db);
+    const data = await loadData(db, uid);
     const r = checkinAllTodayNoWrite(data);
     await saveData(db, data);
     return send(200, r);
   }
   if (pathname === '/api/services/bulk' && method === 'POST') {
     const body = await jsonBody(request);
-    const data = await loadData(db);
+    const data = await loadData(db, uid);
     const ids = new Set((Array.isArray(body.ids) ? body.ids : []).map(String));
     if (!ids.size) return send(400, { error: '没有选中服务' });
     if (body.action === 'delete') {
@@ -2283,7 +2682,7 @@ async function handleAPI(request, env, pathname) {
 
   const m = pathname.match(/^\/api\/services\/([0-9a-f]+)(\/checkin|\/uncheckin|\/checkin-account|\/uncheckin-account|\/visit|\/undo-renew|\/renew|\/move|\/duplicate)?$/);
   if (m) {
-    const data = await loadData(db);
+    const data = await loadData(db, uid);
     const idx = data.services.findIndex((s) => s.id === m[1]);
     if (idx < 0) return send(404, { error: '找不到该服务' });
     const svc = data.services[idx];
@@ -2446,23 +2845,35 @@ export default {
   /* 定时任务：按 wrangler.toml 里的 Cron 表达式分发（每分钟 TG 轮询、每小时提醒+
      自动签到、每 6 小时死链检测、每天 04:00 UTC GitHub 备份；v65：每月 1 号生成月度
      报告、每天自动归档过期服务） */
+  /* v67：定时任务按用户循环跑——每个用户用自己的通知配置（Telegram/webhook/
+     Bark/Server酱）、自己的服务列表做提醒、自动签到、死链检测、月度报告和
+     自动归档；GitHub 备份是全局的，只跑一次（所有用户的数据都在备份里）。 */
   async scheduled(event, env, ctx) {
     const db = env.DB;
     try {
+      const users = await listUsers(db).catch(() => []);
+      const ids = users.map((u) => u.id);
       if (event.cron === '* * * * *') {
-        ctx.waitUntil(pollBotCommands(db));
+        ctx.waitUntil((async () => { for (const id of ids) await pollBotCommands(db, id); })());
       } else if (event.cron === '0 * * * *') {
         ctx.waitUntil((async () => {
-          await runNotifyChecks(db);
-          await runAutoSignins(db);
+          for (const id of ids) {
+            await runNotifyChecks(db, id);
+            await runAutoSignins(db, id);
+          }
           /* v65：每月 1 号（北京时间）生成上月报告并推送；runMonthlyReport 自己判断
              上月报告是否已生成，没生成才推，已生成就直接跳过 */
-          if (todayStr().endsWith('-01')) await runMonthlyReport(db);
+          if (todayStr().endsWith('-01')) {
+            for (const id of ids) await runMonthlyReport(db, id);
+          }
         })());
       } else if (event.cron === '0 */6 * * *') {
-        ctx.waitUntil(checkLinks(db));
+        ctx.waitUntil((async () => { for (const id of ids) await checkLinks(db, id); })());
       } else if (event.cron === '0 4 * * *') {
-        ctx.waitUntil((async () => { await pushGithubBackup(db); await runAutoArchive(db); })());
+        ctx.waitUntil((async () => {
+          await pushGithubBackup(db);
+          for (const id of ids) await runAutoArchive(db, id);
+        })());
       }
     } catch (e) {
       console.error('[!] 定时任务异常:', e.message);
