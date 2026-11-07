@@ -17,7 +17,8 @@ Pure Node.js with **zero dependencies** (no `npm install`), data lives in a sing
 ## ✨ Features
 
 ### Service management
-- **CRUD**: name, category, URL, account, password/secret, price, notes; a service can hold multiple accounts (main/alt) — expand the card to one-tap copy credentials and jump to the site
+- **CRUD**: name, category, URL, price, notes; a service can hold multiple accounts (main/alt)
+- **Accounts manager**: the "👤 Accounts" button on a card opens a dedicated accounts dialog (separate from the service edit page) — view accounts, copy credentials, sign in, set the default, add, edit, and delete accounts. The service edit page has no account fields, so managing accounts can't accidentally change service info
 - **Manageable categories**: custom categories (rename, change icon); only empty custom categories can be deleted
 - **Favorites**: star services, a "★ My Favorites" section on the home page; the "Favorites" category groups in too
 - **Password reuse warning**: if the same password is used on multiple accounts, it is flagged (grouped by password, tap the eye to reveal it) so you can change them to different ones
@@ -29,10 +30,10 @@ Pure Node.js with **zero dependencies** (no `npm install`), data lives in a sing
 
 ### Check-ins & XP
 - **Daily check-in**: +5⚡ per check-in, only the first one of the day counts (anti-farming)
-- **Per-account check-in**: a service with several accounts only counts as done when ALL of its accounts are signed today; each account has its own sign-in button in the accounts panel, and the check-in panel signs all unsigned accounts of a service in one tap; progress is shown per account as a percentage (e.g. 2/3 · 67%), and the ring and all-done bonus count accounts, not services
+- **Per-account check-in**: a service with several accounts only counts as done when ALL of its accounts are signed today; each account has its own sign-in button in the accounts dialog, and the check-in panel signs all unsigned accounts of a service in one tap; progress is shown per account as a percentage (e.g. 2/3 · 67%), and the ring and all-done bonus count accounts, not services
 - **Check-in interval**: check in every N days (1 = daily); services that aren't due are never nagged
 - **All-done bonus**: +10⚡ when everything due today is signed
-- **Undo check-in**: misclicked? Hit "↩ Undo" on the panel or the card (or undo a single account in the accounts panel)
+- **Undo check-in**: misclicked? Hit "↩ Undo" on the panel or the card (or undo a single account in the accounts dialog)
 - **One-click sign-all**: sign everything due today in a single request (multi-account services get all their accounts signed at once)
 - **Levels & achievements**: XP levels, achievement wall, streaks, check-in heatmap, daily fortune
 - **Mark abnormal**: a site temporarily broken and un-check-in-able? Tick "⚠️ Mark abnormal" and its card and check-in row turn red; marked services don't count toward all-done, sign-all, or reminders — unmark them when they're back
