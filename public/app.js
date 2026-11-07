@@ -120,9 +120,23 @@ function dueToday(s, t) {
   if (!c.length) return true;
   return dayDiff(c[c.length - 1], t) >= everyDays(s);
 }
-/* 今日签到 cohort：今天到期 + 今天已签；不到期的服务不计入今日 */
+/* 今日签到 cohort：今天到期 + 今天已签；不到期的服务不计入今日；
+   v57：今天已签 = 全部账号都签了今天（serviceDoneToday） */
 function todayCohort(s, t) {
-  return dueToday(s, t) || (s.checkins || []).includes(t);
+  return dueToday(s, t) || serviceDoneToday(s, t);
+}
+/* v57：账号级签到口径（和服务端一致） */
+function serviceAccounts(s) { return Array.isArray(s?.accounts) ? s.accounts : []; }
+function accCheckins(a) { return Array.isArray(a?.checkins) ? a.checkins : []; }
+function serviceDoneToday(s, t) {
+  const accs = serviceAccounts(s);
+  if (!accs.length) return (s.checkins || []).includes(t);
+  return accs.every((a) => accCheckins(a).includes(t));
+}
+function serviceProgress(s, t) {
+  const accs = serviceAccounts(s);
+  if (!accs.length) return { done: (s.checkins || []).includes(t) ? 1 : 0, total: 1 };
+  return { done: accs.filter((a) => accCheckins(a).includes(t)).length, total: accs.length };
 }
 /* 下次签到（只给间隔 > 1 天的服务显示）：没签过就是今天；否则上次签到 + 间隔天数；算出来已过期的也算今天 */
 function nextCheckinLabel(s, t) {
@@ -279,9 +293,12 @@ function renderAll() {
 
   const d = new Date();
   const t = todayStr();
-  /* v53：计数只算可计的（标记异常的不算全勤、不催），面板列表仍包含异常红显 */
+  /* v53：计数只算可计的（标记异常的不算全勤、不催），面板列表仍包含异常红显
+     v57：进度按账号算——多账号的站，一个账号算一个单位；没账号的站算 1 个单位 */
   const daily = services.filter((s) => todayCohort(s, t) && !s.abnormal);
-  const done = daily.filter((s) => (s.checkins || []).includes(t)).length;
+  const units = daily.map((s) => serviceProgress(s, t));
+  const totalUnits = units.reduce((n, p) => n + p.total, 0);
+  const done = units.reduce((n, p) => n + p.done, 0);
   const soon = services.filter((s) => s.expiresAt && daysUntil(s.expiresAt) <= 7).length;
   const best = Math.max(0, ...services.map((s) => maxRun(s.checkins)));
   const total = services.reduce((n, s) => n + (s.checkins || []).length, 0);
@@ -292,11 +309,11 @@ function renderAll() {
   // 全勤 pill
   const allDays = Object.keys(meta.history || {}).filter((k) => meta.history[k] && meta.history[k].all);
   const allStreak = streak(allDays);
-  $('#streak-pill-text').textContent = allStreak >= 2 ? `已连续全勤 ${allStreak} 天` : `今日 ${done}/${daily.length} 已签`;
+  $('#streak-pill-text').textContent = allStreak >= 2 ? `已连续全勤 ${allStreak} 天` : `今日 ${done}/${totalUnits} 已签`;
 
   // 大标题下的副标题
   $('#sub-line').textContent = live()
-    ? `${me.username}，${hello}！${daily.length && done < daily.length ? `还有 ${daily.length - done} 个站等着你签到 · ` : ''}已收录 ${services.length} 个服务，累计签到 ${total} 次。`
+    ? `${me.username}，${hello}！${totalUnits && done < totalUnits ? `还有 ${totalUnits - done} 个待签 · ` : ''}已收录 ${services.length} 个服务，累计签到 ${total} 次。`
     : `中转站、VPS、游戏机、订阅全记在这，签到额度一个不漏。已收录 ${services.length} 个服务 · 累计签到 ${total} 次，登录后可签到和编辑。`;
 
   // 运势
@@ -311,11 +328,11 @@ function renderAll() {
   typewrite($('#quote-line'), `「${QUOTES[hs % QUOTES.length]}」`);
 
   // 进度环
-  $('#ring-text').textContent = `${done}/${daily.length}`;
-  const pct = daily.length ? done / daily.length : 0;
+  $('#ring-text').textContent = `${done}/${totalUnits}`;
+  const pct = totalUnits ? done / totalUnits : 0;
   const fg = $('#ring-fg');
   fg.style.strokeDashoffset = RING_C * (1 - pct);
-  fg.classList.toggle('full', daily.length > 0 && done === daily.length);
+  fg.classList.toggle('full', totalUnits > 0 && done === totalUnits);
 
   // 等级徽章 & 侧栏用户卡
   $('#level-pill').textContent = `⚡ Lv.${lv.lv} ${lv.title}`;
@@ -337,16 +354,16 @@ function renderAll() {
 
   // 一键全签按钮
   const b = $('#btn-check-all');
-  if (!daily.length) { b.classList.add('hidden'); }
+  if (!totalUnits) { b.classList.add('hidden'); }
   else {
     b.classList.remove('hidden');
-    if (done === daily.length) { b.textContent = '今日已全签 ✓'; b.disabled = true; }
+    if (done === totalUnits) { b.textContent = '今日已全签 ✓'; b.disabled = true; }
     else { b.textContent = '⚡ 一键全签'; b.disabled = false; }
   }
 
-  $('#stats').textContent = `共 ${services.length} 个服务 · 今日已签 ${done}/${daily.length} · 7天内到期 ${soon}`;
-  $('#checkin-progress').textContent = daily.length ? `今日已签 ${done}/${daily.length}` : '';
-  $('#checkin-bar').style.width = daily.length ? `${(done / daily.length) * 100}%` : '0';
+  $('#stats').textContent = `共 ${services.length} 个服务 · 今日已签 ${done}/${totalUnits} · 7天内到期 ${soon}`;
+  $('#checkin-progress').textContent = totalUnits ? `今日已签 ${done}/${totalUnits}` : '';
+  $('#checkin-bar').style.width = totalUnits ? `${(done / totalUnits) * 100}%` : '0';
 
   renderBanner();
   if (!live()) renderLanding();
@@ -384,15 +401,17 @@ function renderCheckin() {
   const t = todayStr();
   const list = services.filter((s) => todayCohort(s, t));
   /* v49：未签的上浮、已签的下沉，点完自动流动；同组内保持原顺序
-     v53：标记异常的沉到底（不算待签，不占上面位置） */
-  list.sort((a, b) => ((a.abnormal ? 2 : (a.checkins || []).includes(t) ? 1 : 0)) - ((b.abnormal ? 2 : (b.checkins || []).includes(t) ? 1 : 0)));
+     v53：标记异常的沉到底（不算待签，不占上面位置）
+     v57：已签 = 全部账号都签完（serviceDoneToday），只签了一部分还算未签，留在上面 */
+  list.sort((a, b) => ((a.abnormal ? 2 : serviceDoneToday(a, t) ? 1 : 0)) - ((b.abnormal ? 2 : serviceDoneToday(b, t) ? 1 : 0)));
   const box = $('#checkin-list');
   if (!list.length) {
     box.innerHTML = `<div class="empty">今天没有需要签到的服务。${live() ? '点右上角「➕ 添加服务」，把「签到频率」设为「每天」就会按周期出现在这里。' : '登录后添加，把「签到频率」设为「每天」即可。'}</div>`;
     return;
   }
   box.innerHTML = list.map((s) => {
-    const ok = (s.checkins || []).includes(t);
+    const ok = serviceDoneToday(s, t);
+    const p = serviceProgress(s, t);
     const st = streak(s.checkins);
     const last = (s.checkins || []).length ? s.checkins[s.checkins.length - 1] : '从未签到';
     const right = live()
@@ -402,7 +421,7 @@ function renderCheckin() {
       : `<button class="btn ghost" data-act="wantlogin">🔒 登录后签到</button>`;
     return `<div class="checkin-row${s.abnormal ? ' abnormal' : ''}">
       <div class="ci-info">
-        <div class="ci-name">${esc(s.name)} ${s.abnormal ? '<span class="chip abn">⚠️ 异常</span>' : ''}${st ? `<span class="chip fire">🔥 连续${st}天</span>` : ''}</div>
+        <div class="ci-name">${esc(s.name)} ${s.abnormal ? '<span class="chip abn">⚠️ 异常</span>' : ''}${st ? `<span class="chip fire">🔥 连续${st}天</span>` : ''}${p.total > 1 ? `<span class="chip">${ok ? '✓ 全部账号已签' : `已签 ${p.done}/${p.total} · ${Math.round(p.done / p.total * 100)}%`}</span>` : ''}</div>
         <div class="ci-sub">${s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.url)}</a>` : '未填网址'} · 上次：${esc(last)}</div>
       </div>
       ${right}
@@ -469,19 +488,32 @@ function cardBold(s) {
   return '点击标题直达官网';
 }
 
-/* 卡片上展开的账号面板：密码默认打码，点眼睛才显示；复制、设默认都在这 */
+/* 卡片上展开的账号面板：密码默认打码，点眼睛才显示；复制、设默认都在这；
+   v57：每天签到的服务，每个账号旁边有自己的签到按钮（签了变“✓ 已签”，点错了能撤回） */
 const expandedAccounts = new Set();
 function accountsPanelHTML(s) {
+  const t = todayStr();
   const list = accountList(s);
-  const rows = list.map((a) => `<div class="acc-item">
-      <div class="acc-item-top"><b>${esc(a.label)}</b>${a.isDefault ? '<span class="acc-default-tag">★ 默认</span>' : `<button class="btn small ghost" data-act="set-default-acc" data-id="${s.id}" data-acc="${esc(a.id)}">设为默认</button>`}</div>
+  const canCheckin = live() && s.checkinFrequency === 'daily' && s.category !== 'idle';
+  const rows = list.map((a) => {
+    const signed = accCheckins(a).includes(t);
+    const signBtn = canCheckin
+      ? (signed
+        ? `<span class="signed-tag">✓ 今日已签</span><button class="btn small ghost" data-act="uncheckin-acc" data-id="${s.id}" data-acc="${esc(a.id)}">↩ 撤回</button>`
+        : `<button class="btn small primary" data-act="checkin-acc" data-id="${s.id}" data-acc="${esc(a.id)}">签到</button>`)
+      : '';
+    return `<div class="acc-item">
+      <div class="acc-item-top"><b>${esc(a.label)}</b>${a.isDefault ? '<span class="acc-default-tag">★ 默认</span>' : `<button class="btn small ghost" data-act="set-default-acc" data-id="${s.id}" data-acc="${esc(a.id)}">设为默认</button>`}<span style="margin-left:auto">${signBtn}</span></div>
       <div class="acc-line"><span class="acc-k">账号</span><span class="acc-v">${esc(a.username) || '<i class="muted">（空）</i>'}</span><button class="btn small ghost" data-act="copy-acc-user" data-id="${s.id}" data-acc="${esc(a.id)}">复制</button></div>
       <div class="acc-line"><span class="acc-k">密码</span><span class="acc-v acc-pw">••••••</span><button class="btn small ghost" data-act="toggle-pw" data-id="${s.id}" data-acc="${esc(a.id)}">👁</button><button class="btn small ghost" data-act="copy-acc-pw" data-id="${s.id}" data-acc="${esc(a.id)}">复制</button></div>
       ${a.notes ? `<div class="acc-note">${esc(a.notes)}</div>` : ''}
-    </div>`).join('');
+    </div>`;
+  }).join('');
+  const p = serviceProgress(s, t);
+  const prog = (canCheckin && p.total > 1) ? `<span class="muted">已签 ${p.done}/${p.total} · ${Math.round(p.done / p.total * 100)}%</span>` : '';
   return `<div class="acc-panel">
-    <div class="acc-panel-head"><b>👤 账号（${list.length}）</b>${s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener">直达网站 ↗</a>` : ''}<button class="btn small ghost" data-act="edit" data-id="${s.id}">✏️ 编辑账号</button></div>
-    ${rows || '<div class="empty">还没录账号，点“编辑账号”添加。</div>'}
+    <div class="acc-panel-head"><b>👤 账号（${list.length}）</b>${prog}${s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener">直达网站 ↗</a>` : ''}</div>
+    ${rows || '<div class="empty">还没录账号，点卡片上的「编辑」添加。</div>'}
   </div>`;
 }
 
@@ -490,7 +522,9 @@ function cardHTML(s, idx) {
   const num = String(idx + 1).padStart(2, '0');
   const d = daysUntil(s.expiresAt);
   const st = streak(s.checkins);
-  const checkedToday = live() && (s.checkins || []).includes(todayStr());
+  const checkedToday = live() && serviceDoneToday(s, todayStr());
+  const prog = serviceProgress(s, todayStr());
+  const partialBadge = (prog.total > 1 && prog.done > 0 && !checkedToday) ? `<span class="badge b-warn">已签 ${prog.done}/${prog.total}</span>` : '';
   let exp = '';
   if (d !== null) {
     let badge, cls;
@@ -519,7 +553,7 @@ function cardHTML(s, idx) {
             ? `<button class="btn small ok" data-act="uncheckin" data-id="${s.id}">↩ 撤回</button>`
             : (dueToday(s, todayStr())
               ? `<button class="btn small primary" data-act="checkin" data-id="${s.id}">签到</button>` : '')) : ''}
-        <button class="btn small ghost" data-act="toggle-accounts" data-id="${s.id}">👤 账号${accountList(s).length ? ` (${accountList(s).length})` : ''}</button>
+        ${accountList(s).length ? `<button class="btn small ghost" data-act="toggle-accounts" data-id="${s.id}">👤 账号 (${accountList(s).length})</button>` : ''}
         <button class="btn small ghost" data-act="edit" data-id="${s.id}">编辑</button>
         <button class="btn small ghost" data-act="move-up" data-id="${s.id}" title="上移">↑</button>
         <button class="btn small ghost" data-act="move-down" data-id="${s.id}" title="下移">↓</button>
@@ -532,7 +566,7 @@ function cardHTML(s, idx) {
     <span class="ghost-num">${num}</span>
     <div class="c-head">
       <span class="cat-pill ${cat.cls}"><i></i>${cat.icon} ${cat.label}</span>
-      <span class="c-badges">${isFav(s) ? '<span class="badge b-fav">★ 收藏</span>' : ''}${s.abnormal ? '<span class="badge b-bad">⚠️ 异常</span>' : ''}${s.visits ? `<span class="badge b-visit" title="累计访问 ${s.visits} 次">👆 ${s.visits}</span>` : ''}${exp}${s.linkStatus === 'dead' ? '<span class="badge b-bad" title="最近一次检测打不开">⚠️ 疑似失效</span>' : ''}${st ? `<span class="badge b-fire">🔥 连${st}天</span>` : ''}${checkedToday ? '<span class="badge b-ok">今日已签</span>' : ''}</span>
+      <span class="c-badges">${isFav(s) ? '<span class="badge b-fav">★ 收藏</span>' : ''}${s.abnormal ? '<span class="badge b-bad">⚠️ 异常</span>' : ''}${s.visits ? `<span class="badge b-visit" title="累计访问 ${s.visits} 次">👆 ${s.visits}</span>` : ''}${exp}${s.linkStatus === 'dead' ? '<span class="badge b-bad" title="最近一次检测打不开">⚠️ 疑似失效</span>' : ''}${st ? `<span class="badge b-fire">🔥 连${st}天</span>` : ''}${checkedToday ? '<span class="badge b-ok">今日已签</span>' : ''}${partialBadge}</span>
     </div>
     <div class="c-title">${favIcon(s)}${s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener" data-visit="${s.id}">${esc(s.name)} <span class="arrow">↗</span></a>` : esc(s.name)}</div>
     <div class="c-desc">${esc(bold)}</div>
@@ -605,25 +639,29 @@ function landingSiteCard(s, star) {
 function renderLanding() {
   const t = todayStr();
   const daily = services.filter((s) => todayCohort(s, t));
-  /* v53：落地统计只算可计的，异常不占分母；列表仍含异常红显 */
+  /* v53：落地统计只算可计的，异常不占分母；列表仍含异常红显
+     v57：落地统计也按账号算（多账号的站，一个账号算一个单位） */
   const countable = daily.filter((s) => !s.abnormal);
-  const done = countable.filter((s) => (s.checkins || []).includes(t)).length;
+  const units = countable.map((s) => serviceProgress(s, t));
+  const totalUnits = units.reduce((n, p) => n + p.total, 0);
+  const done = units.reduce((n, p) => n + p.done, 0);
   const doneEl = $('#lf-done');
-  if (doneEl) doneEl.textContent = `${done}/${countable.length}`;
+  if (doneEl) doneEl.textContent = `${done}/${totalUnits}`;
   const streakEl = $('#lf-streak');
   if (streakEl) streakEl.textContent = `${Math.max(0, ...services.map((s) => maxRun(s.checkins)))} 天`;
   const sitesEl = $('#lf-sites');
   if (sitesEl) sitesEl.textContent = services.length;
   const bar = $('#landing-checkin-bar');
-  if (bar) bar.style.width = countable.length ? `${(done / countable.length) * 100}%` : '0';
+  if (bar) bar.style.width = totalUnits ? `${(done / totalUnits) * 100}%` : '0';
   const ccEl = $('#landing-checkin-count');
-  if (ccEl) ccEl.textContent = countable.length ? `${done}/${countable.length}` : '';
+  if (ccEl) ccEl.textContent = totalUnits ? `${done}/${totalUnits}` : '';
   const list = $('#landing-checkin-list');
   if (list) {
     list.innerHTML = daily.length
       ? daily.map((s) => {
-          const ok = (s.checkins || []).includes(t);
-          return `<div class="landing-checkin-item${ok ? ' done' : ''}${s.abnormal ? ' abnormal' : ''}"><span class="ck ${ok ? 'done' : 'todo'}">${ok ? '✓' : ''}</span><span class="ck-name">${s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.name)}</a>` : esc(s.name)}</span><span class="ck-note">${ok ? '今日已签' : (s.abnormal ? '⚠️ 异常，暂时签到不了' : '登录后可签到')}</span></div>`;
+          const ok = serviceDoneToday(s, t);
+          const p = serviceProgress(s, t);
+          return `<div class="landing-checkin-item${ok ? ' done' : ''}${s.abnormal ? ' abnormal' : ''}"><span class="ck ${ok ? 'done' : 'todo'}">${ok ? '✓' : ''}</span><span class="ck-name">${s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.name)}</a>` : esc(s.name)}</span><span class="ck-note">${ok ? '今日已签' : (s.abnormal ? '⚠️ 异常，暂时签到不了' : (p.total > 1 ? `已签 ${p.done}/${p.total} · 登录后可签到` : '登录后可签到'))}</span></div>`;
         }).join('')
       : '<div class="empty">还没有需要每日签到的服务。</div>';
   }
@@ -938,7 +976,7 @@ document.body.addEventListener('click', async (e) => {
 
   /* 防连点：写数据的按钮点下去就禁用，直到请求 + 刷新完成；失败也恢复。
      只拦真正写数据的动作，打开弹窗/登录/查看密钥这种纯前端动作不拦 */
-  const guarded = ['fav', 'checkin', 'uncheckin', 'renew', 'undo-renew', 'move-up', 'move-down', 'del', 'set-default-acc'].includes(act);
+  const guarded = ['fav', 'checkin', 'uncheckin', 'checkin-acc', 'uncheckin-acc', 'renew', 'undo-renew', 'move-up', 'move-down', 'del', 'set-default-acc'].includes(act);
   if (guarded) btn.disabled = true;
   try {
     if (act === 'wantlogin') { openLogin(); return; }
@@ -1013,6 +1051,24 @@ document.body.addEventListener('click', async (e) => {
         }
       } else {
         toast('已撤回今日签到');
+      }
+      await loadAll();
+    } else if (act === 'checkin-acc' || act === 'uncheckin-acc') {
+      /* v57：只签/撤一个账号；签完最后一个账号服务才算签完（这时才给分） */
+      const r = await api(`/api/services/${id}/${act === 'checkin-acc' ? 'checkin-account' : 'uncheckin-account'}`, { method: 'POST', body: JSON.stringify({ accountId: btn.dataset.acc }) });
+      if (act === 'checkin-acc') {
+        if (r.xpGained > 0) toast(`+${r.xpGained} 热情值 ⚡`, 'gold');
+        else if (r.accounts && r.accounts.length > 1) {
+          const doneN = r.accounts.filter((a) => (a.checkins || []).includes(todayStr())).length;
+          toast(`已签 ${doneN}/${r.accounts.length}`);
+        }
+        if (r.allDone) { confetti(90); setTimeout(() => toast('🎉 今日全勤达成！奖励 +10⚡', 'gold'), 900); }
+        if (r.unlocked && r.unlocked.length) {
+          confetti(110);
+          setTimeout(() => toast(`🏆 解锁成就：${r.unlocked.map((a) => `${a.icon} ${a.name}`).join('、')}（+10⚡）`, 'gold'), 1800);
+        }
+      } else {
+        toast('已撤回该账号的今日签到');
       }
       await loadAll();
     } else if (act === 'renew') {

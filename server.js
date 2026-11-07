@@ -423,7 +423,8 @@ function sanitizeAccount(a) {
     username: String(a.username || '').trim().slice(0, 200),
     password: String(a.password || '').slice(0, 500),
     notes: String(a.notes || '').trim().slice(0, 200),
-    isDefault: !!a.isDefault
+    isDefault: !!a.isDefault,
+    checkins: (Array.isArray(a.checkins) ? a.checkins : []).filter((d) => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d)).slice(0, 1000).sort()
   };
 }
 /* 归一化：accounts 数组是唯一事实来源；account/secret 只做默认账号的镜像（兼容旧代码、CSV、台账） */
@@ -431,11 +432,16 @@ function normalizeAccounts(svc) {
   if (!Array.isArray(svc.accounts)) svc.accounts = [];
   svc.accounts = svc.accounts.map(sanitizeAccount).filter(Boolean).slice(0, 20);
   if (!svc.accounts.length && (svc.account || svc.secret)) {
-    svc.accounts.push({ id: crypto.randomBytes(6).toString('hex'), label: '默认', username: String(svc.account || ''), password: String(svc.secret || ''), notes: '', isDefault: true });
+    svc.accounts.push({ id: crypto.randomBytes(6).toString('hex'), label: '默认', username: String(svc.account || ''), password: String(svc.secret || ''), notes: '', isDefault: true, checkins: [] });
   }
   let def = svc.accounts.find((a) => a.isDefault);
   if (!def && svc.accounts.length) { svc.accounts[0].isDefault = true; def = svc.accounts[0]; }
   svc.accounts.forEach((a) => { if (a !== def) a.isDefault = false; });
+  /* 旧数据迁移：服务级签到记录是单账号时代的；如果没有任何账号有签到记录，
+     就把它算到默认账号头上（连签不断），只迁一次（迁完默认账号就有了记录，不会再跑） */
+  if (svc.accounts.length && (svc.checkins || []).length && !svc.accounts.some((a) => (a.checkins || []).length)) {
+    def.checkins = [...(svc.checkins || [])].sort();
+  }
   svc.account = def ? def.username : '';
   svc.secret = def ? def.password : '';
   return svc;
@@ -455,9 +461,19 @@ function pickFields(b, existing, catIds) {
      星标值，绝不强制改回、也绝不改分类 */
   if (b.category === 'fav' && (!existing || existing.category !== 'fav')) out.favorite = true;
   /* 多账号：传了 accounts 数组就用它（默认账号同步到 account/secret）；只传了旧式
-     account/secret 就改默认账号（没有就新建一个）。account/secret 不再单独走下面的循环 */
+     account/secret 就改默认账号（没有就新建一个）。account/secret 不再单独走下面的循环。
+     弹窗编辑只发账号信息不发签到记录：按 id 沿用旧的签到记录，别清掉 */
   if (Array.isArray(b.accounts)) {
-    out.accounts = b.accounts.map(sanitizeAccount).filter(Boolean).slice(0, 20);
+    const existingById = new Map((Array.isArray(existing?.accounts) ? existing.accounts : []).map((a) => [String(a.id || ''), a]));
+    out.accounts = b.accounts.map((a) => {
+      const s = sanitizeAccount(a);
+      if (!s) return null;
+      if ((!a.checkins || !a.checkins.length) && existingById.has(s.id)) {
+        const old = existingById.get(s.id);
+        if (Array.isArray(old.checkins)) s.checkins = old.checkins.filter((d) => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d)).slice(0, 1000).sort();
+      }
+      return s;
+    }).filter(Boolean).slice(0, 20);
     const def = out.accounts.find((a) => a.isDefault) || out.accounts[0];
     out.account = def ? def.username : '';
     out.secret = def ? def.password : '';
@@ -552,9 +568,43 @@ function checkinDue(s, t) {
   return dayDiff(c[c.length - 1], t) >= checkinEvery(s);
 }
 /* 今日签到 cohort：今天到期 + 今天已签；N 天制下不该签的服务不计入今日；
-   v53：标记异常的服务也不计入（不挡全勤、不进提醒），只在面板里红显 */
+   v53：标记异常的服务也不计入（不挡全勤、不进提醒），只在面板里红显；
+   v57：今天已签 = 全部账号都签了今天（serviceDoneToday），不是服务级 checkins 里有今天 */
 function checkinCohort(data, t) {
-  return dailyServices(data).filter((s) => !s.abnormal && (checkinDue(s, t) || (s.checkins || []).includes(t)));
+  return dailyServices(data).filter((s) => !s.abnormal && (checkinDue(s, t) || serviceDoneToday(s, t)));
+}
+/* v57：账号级签到。一个服务有多个账号时，只有全部账号都签了今天，这个服务才算“签完”。
+   服务级 checkins 仍是“签完”的记录（连签/历史/全勤都按它算），账号级 checkins 只记每个账号的签到。 */
+function accountCheckins(a) { return Array.isArray(a.checkins) ? a.checkins : []; }
+function serviceAccounts(s) { return Array.isArray(s.accounts) ? s.accounts : []; }
+/* 服务今天是否签完：有账号 → 全部账号都签了今天；没账号 → 服务级 checkins 有今天 */
+function serviceDoneToday(s, t) {
+  const accs = serviceAccounts(s);
+  if (!accs.length) return (s.checkins || []).includes(t);
+  return accs.every((a) => accountCheckins(a).includes(t));
+}
+/* 服务今天的签到进度：{done, total}；没账号时 total=1（服务本身算一个单位） */
+function serviceProgress(s, t) {
+  const accs = serviceAccounts(s);
+  if (!accs.length) return { done: (s.checkins || []).includes(t) ? 1 : 0, total: 1 };
+  return { done: accs.filter((a) => accountCheckins(a).includes(t)).length, total: accs.length };
+}
+/* 签一个账号：把今天记到该账号头上；如果这下全部账号都签了，就把今天记到服务级 checkins（算签完，给分） */
+function doCheckinAccount(data, svc, acc, t) {
+  acc.checkins = accountCheckins(acc);
+  if (acc.checkins.includes(t)) return 0;
+  acc.checkins.push(t);
+  acc.checkins.sort();
+  if (!serviceDoneToday(svc, t)) return 0; // 还没全签完，不给分、不记服务级
+  return doCheckin(data, svc, t); // 全签完了，走服务级签到（记服务级 + 给分）
+}
+/* 撤一个账号：把今天从该账号头上拿掉；如果服务原来是签完的，这下就不算签完了，把今天从服务级记录里也拿掉 */
+function doUncheckinAccount(data, svc, acc, t) {
+  acc.checkins = accountCheckins(acc).filter((d) => d !== t);
+  if ((svc.checkins || []).includes(t) && !serviceDoneToday(svc, t)) {
+    svc.checkins = svc.checkins.filter((d) => d !== t);
+    if (data.history[t]) data.history[t].c = Math.max(0, (data.history[t].c || 1) - 1);
+  }
 }
 /* 与前端 daysUntil 同口径：按服务器本地日期算剩余天数 */
 function daysUntilSrv(dateStr) {
@@ -588,10 +638,11 @@ function doCheckin(data, svc, t) {
   }
   return xp;
 }
-/* 全勤奖励：今日 cohort 全部签完且今天还没领过才给；不到期的服务不挡全勤 */
+/* 全勤奖励：今日 cohort 全部签完且今天还没领过才给；不到期的服务不挡全勤；
+   v57：签完 = 全部账号都签了今天（serviceDoneToday） */
 function allDoneBonus(data, t) {
   const cohort = checkinCohort(data, t);
-  const allDone = cohort.length > 0 && cohort.every((s) => (s.checkins || []).includes(t));
+  const allDone = cohort.length > 0 && cohort.every((s) => serviceDoneToday(s, t));
   data.history[t] = data.history[t] || { c: 0 };
   if (allDone && !data.history[t].all) {
     data.history[t].all = true;
@@ -599,18 +650,30 @@ function allDoneBonus(data, t) {
   }
   return { allDone, bonus: 0 };
 }
-/* 批量签到：把当天所有未签的每日服务一次签完，只写一次盘 */
-/* 一键全签（不写盘）：给 Telegram 轮询用，由轮询最后统一做合并写回，避免中途整盘写回盖掉用户改动 */
+/* 批量签到：把当天所有未签的每日服务一次签完，只写一次盘；
+   v57：一键全签把每个服务的全部账号都签了（没账号的走服务级签到） */
 function checkinAllTodayNoWrite(data) {
   const t = todayStr();
   const todo = unsignedDaily(data, t);
   let xpGained = 0;
-  for (const svc of todo) xpGained += doCheckin(data, svc, t);
+  let accountsSigned = 0;
+  for (const svc of todo) {
+    const accs = serviceAccounts(svc);
+    if (accs.length) {
+      for (const a of accs) {
+        if (!accountCheckins(a).includes(t)) accountsSigned++;
+        xpGained += doCheckinAccount(data, svc, a, t);
+      }
+    } else {
+      accountsSigned++;
+      xpGained += doCheckin(data, svc, t);
+    }
+  }
   const { allDone, bonus } = allDoneBonus(data, t);
   xpGained += bonus;
   data.xp = (data.xp || 0) + xpGained;
   const unlocked = syncAchievements(data);
-  return { signed: todo.length, xpGained, allDone, unlocked, xp: data.xp, level: levelOf(data.xp) };
+  return { signed: todo.length, accountsSigned, xpGained, allDone, unlocked, xp: data.xp, level: levelOf(data.xp) };
 }
 function checkinAllToday(data) {
   const r = checkinAllTodayNoWrite(data);
@@ -629,7 +692,12 @@ function expiringLines(items) {
   return lines;
 }
 function checkinLines(todo) {
-  const lines = todo.slice(0, 20).map((s) => `• <b>${escHtml(s.name)}</b>`);
+  const t = todayStr();
+  const lines = todo.slice(0, 20).map((s) => {
+    const p = serviceProgress(s, t);
+    const suffix = p.total > 1 ? `（已签 ${p.done}/${p.total}）` : '';
+    return `• <b>${escHtml(s.name)}</b>${suffix}`;
+  });
   if (todo.length > 20) lines.push(`…等共 ${todo.length} 个`);
   return lines;
 }
@@ -1310,7 +1378,7 @@ async function handleAPI(req, res, pathname) {
     return send(400, { error: '未知操作' });
   }
 
-  const m = pathname.match(/^\/api\/services\/([0-9a-f]+)(\/checkin|\/uncheckin|\/visit|\/undo-renew|\/renew|\/move)?$/);
+  const m = pathname.match(/^\/api\/services\/([0-9a-f]+)(\/checkin|\/uncheckin|\/checkin-account|\/uncheckin-account|\/visit|\/undo-renew|\/renew|\/move)?$/);
   if (m) {
     const data = loadData();
     const idx = data.services.findIndex((s) => s.id === m[1]);
@@ -1324,16 +1392,48 @@ async function handleAPI(req, res, pathname) {
       return send(200, { ok: true, visits: svc.visits });
     }
     if (req.method === 'POST' && m[2] === '/checkin') {
-      let xpGained = doCheckin(data, svc, t);
+      /* v57：有账号的服务，一次把还没签的账号全签了；没账号的走服务级签到（和原来一样） */
+      let xpGained = 0;
+      const accs = serviceAccounts(svc);
+      if (accs.length) {
+        for (const a of accs) xpGained += doCheckinAccount(data, svc, a, t);
+      } else {
+        xpGained = doCheckin(data, svc, t);
+      }
       const { allDone, bonus } = allDoneBonus(data, t);
       xpGained += bonus;
       data.xp += xpGained;
       const unlocked = syncAchievements(data);
       writeJSON(DATA_FILE, data);
       return send(200, {
-        ok: true, checkins: svc.checkins, xpGained, allDone,
+        ok: true, checkins: svc.checkins, accounts: svc.accounts, xpGained, allDone,
         unlocked, xp: data.xp, level: levelOf(data.xp)
       });
+    }
+    if (req.method === 'POST' && m[2] === '/checkin-account') {
+      /* v57：只签一个账号；签完这个账号后如果全部账号都签了，服务才算签完（给分） */
+      const body = await jsonBody(req);
+      const acc = serviceAccounts(svc).find((a) => a.id === String(body.accountId || ''));
+      if (!acc) return send(404, { error: '找不到该账号' });
+      let xpGained = doCheckinAccount(data, svc, acc, t);
+      const { allDone, bonus } = allDoneBonus(data, t);
+      xpGained += bonus;
+      data.xp += xpGained;
+      const unlocked = syncAchievements(data);
+      writeJSON(DATA_FILE, data);
+      return send(200, {
+        ok: true, checkins: svc.checkins, accounts: svc.accounts, xpGained, allDone,
+        unlocked, xp: data.xp, level: levelOf(data.xp)
+      });
+    }
+    if (req.method === 'POST' && m[2] === '/uncheckin-account') {
+      /* v57：只撤一个账号；服务原来是签完的，这下就不算签完了 */
+      const body = await jsonBody(req);
+      const acc = serviceAccounts(svc).find((a) => a.id === String(body.accountId || ''));
+      if (!acc) return send(404, { error: '找不到该账号' });
+      doUncheckinAccount(data, svc, acc, t);
+      writeJSON(DATA_FILE, data);
+      return send(200, { ok: true, checkins: svc.checkins, accounts: svc.accounts });
     }
     if (req.method === 'POST' && m[2] === '/renew') {
       /* 按服务自己的续期周期顺延：未过期的从原到期日起续，已过期的从今天起续，免得续完还是过期；
@@ -1373,10 +1473,15 @@ async function handleAPI(req, res, pathname) {
       return send(200, { ok: true, moved: true });
     }
     if (req.method === 'POST' && m[2] === '/uncheckin') {
+      /* v57：多账号的服务，撤回就是把今天从所有账号和服务级记录里都拿掉；没账号的和原来一样 */
+      const accs = serviceAccounts(svc);
+      if (accs.length) {
+        for (const a of accs) a.checkins = accountCheckins(a).filter((d) => d !== t);
+      }
       svc.checkins = svc.checkins.filter((d) => d !== t);
       if (data.history[t]) data.history[t].c = Math.max(0, (data.history[t].c || 1) - 1);
       writeJSON(DATA_FILE, data);
-      return send(200, { ok: true, checkins: svc.checkins });
+      return send(200, { ok: true, checkins: svc.checkins, accounts: svc.accounts });
     }
     if (req.method === 'PUT' && !m[2]) {
       const body = await jsonBody(req);
