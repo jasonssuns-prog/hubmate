@@ -11,7 +11,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="apple-touch-icon" href="/icon-180.png">
-<link rel="stylesheet" href="/style.css?v=20261108-64">
+<link rel="stylesheet" href="/style.css?v=20261108-65">
 </head>
 <body class="mode-preview" data-theme="neon">
 
@@ -104,10 +104,12 @@
       <a href="#sec-notify" class="nav-item live-only"><i>🔔</i>通知设置</a>
       <a href="#sec-apitoken" class="nav-item live-only"><i>🔑</i>API 令牌</a>
       <a href="#sec-totp" class="nav-item live-only"><i>🔐</i>二次验证</a>
+      <a href="#sec-logins" class="nav-item live-only"><i>🕐</i>最近登录</a>
       <a href="#sec-github" class="nav-item live-only"><i>☁️</i>GitHub 备份</a>
       <a href="#sec-sync" class="nav-item live-only"><i>🔄</i>多服务器同步</a>
       <a href="#sec-dupes" class="nav-item live-only"><i>♻️</i>重复清理</a>
       <a href="#sec-pwreuse" class="nav-item live-only"><i>🔐</i>密码复用 <span class="nav-badge" id="pwreuse-nav-count"></span></a>
+      <a href="#sec-vault" class="nav-item live-only"><i>🗝️</i>账号库</a>
       <a href="#sec-cats" class="nav-item live-only"><i>🏷️</i>分类管理</a>
       <a href="#sec-notes" class="nav-item live-only"><i>📝</i>记事本</a>
     </nav>
@@ -210,6 +212,7 @@
     <section class="panel live-only" id="sec-year">
       <div class="panel-head">
         <h2 id="year-title">📈 年度总结</h2>
+        <button class="btn small ghost" id="btn-share-card" type="button" title="把本月签到成绩画成一张图下载下来，发朋友圈/群">📤 分享我的签到</button>
       </div>
       <div id="year-list"></div>
     </section>
@@ -308,6 +311,15 @@
       <p class="muted" id="totp-msg">启用步骤：点“生成密钥”→ 在 Authenticator 里手动添加账号，密钥填上面那串（或把 otpauth 链接粘到支持的工具里）→ 输一次动态码点“启用二次验证”。</p>
     </section>
 
+    <section class="panel live-only" id="sec-logins">
+      <div class="panel-head">
+        <h2>🕐 最近登录</h2>
+        <span class="muted">每次成功登录都记一条</span>
+      </div>
+      <div class="help-fold"><button class="help-toggle" type="button">📖 说明 ▾</button><div class="help-body"><p class="muted">最近 10 次登录（时间、IP、大致设备）。如果某次登录的 IP 和上次不同，配了 Telegram 时会立刻发一条异地登录提醒；不是你本人就马上改密码。</p></div></div>
+      <div id="logins-list"></div>
+    </section>
+
     <section class="panel live-only" id="sec-github">
       <div class="panel-head">
         <h2>☁️ GitHub 备份</h2>
@@ -364,6 +376,35 @@
       </div>
       <div class="help-fold"><button class="help-toggle" type="button">📖 说明 ▾</button><div class="help-body"><p class="muted">同一个密码用在多个账号上，一个站泄露了，其他站也跟着危险。下面按密码分组列出，点眼睛看密码原文，建议给这些账号换成不同的密码。只统计已录进来的账号，没录的不算。</p></div></div>
       <div id="pwreuse-list"></div>
+    </section>
+
+    <section class="panel live-only" id="sec-vault">
+      <div class="panel-head">
+        <h2>🗝️ 共享账号库</h2>
+        <span id="vault-count" class="muted"></span>
+      </div>
+      <div class="help-fold"><button class="help-toggle" type="button">📖 说明 ▾</button><div class="help-body"><p class="muted">一个账号多处共用时（比如同一个用户名密码登好几个网站），只存一份在这里，服务里链接它。库里改一次密码，所有链接的服务都跟着变；库里删掉它，链接的服务自动变回本地副本（账号密码不变，不丢数据）。库里的密码只在登录后可见，公开接口里没有；下载的完整备份里有（和服务账号一样，是你自己的数据，恢复用）。</p></div></div>
+      <div id="vault-list"></div>
+      <div id="vault-form" class="hidden" style="margin-top:14px">
+        <div class="fgrid">
+          <label>账号名称<input id="v-label" placeholder="如：我的常用账号" maxlength="30"></label>
+          <label>账号<input id="v-username" placeholder="账号" maxlength="200"></label>
+          <label class="span2">密码
+            <span style="display:flex;gap:8px">
+              <input id="v-password" placeholder="密码" style="flex:1;min-width:0">
+              <button id="btn-vault-gen" class="btn ghost" type="button" title="生成一个随机强密码">🎲 生成</button>
+            </span>
+          </label>
+          <label class="span2">备注（可选）<input id="v-notes" placeholder="备注（可选）" maxlength="200"></label>
+        </div>
+        <div class="modal-acts" style="justify-content:flex-start">
+          <button id="btn-vault-save" class="btn primary" type="button">添加到账号库</button>
+          <button id="btn-vault-cancel" class="btn ghost" type="button">取消</button>
+        </div>
+      </div>
+      <div class="modal-acts" style="justify-content:flex-start">
+        <button id="btn-vault-add" class="btn primary" type="button">➕ 添加账号</button>
+      </div>
     </section>
 
     <section class="panel live-only" id="sec-cats">
@@ -463,6 +504,26 @@
       </div>
       <canvas id="uptime-chart" class="trend"></canvas>
     </section>
+    <section class="panel live-only" id="sec-secscore">
+      <div class="panel-head"><h2>🔐 最不安全的 5 个账号</h2><span class="muted">安全分最低的 5 个（密码长度 + 字符种类 − 复用 − 超 90 天没换）</span></div>
+      <div id="secscore-list"></div>
+    </section>
+    <section class="panel live-only" id="sec-pwrotate">
+      <div class="panel-head"><h2>🔑 该换密码了</h2><span id="pwrotate-count" class="muted"></span></div>
+      <div class="help-fold"><button class="help-toggle" type="button">📖 说明 ▾</button><div class="help-body"><p class="muted">超过 90 天没换密码的账号，按上次改密日期排。没记改密日的老账号不算在内（按“未知”处理）；每天 17:00 的签到提醒里也会顺带提一句有几个该换了。</p></div></div>
+      <div id="pwrotate-list"></div>
+    </section>
+    <section class="panel live-only" id="sec-monthly">
+      <div class="panel-head"><h2>📊 月度报告</h2><span class="muted">每月 1 号自动生成上月报告并推 Telegram</span></div>
+      <div id="monthly-list"></div>
+      <div class="modal-acts" style="justify-content:flex-start">
+        <button id="btn-gen-monthly" class="btn ghost" type="button">手动生成上月报告</button>
+      </div>
+    </section>
+    <section class="panel live-only" id="sec-monthly-uptime">
+      <div class="panel-head"><h2 id="monthly-uptime-title">📉 本月可用性</h2><span class="muted">按在线率从低到高排（当月有探测记录的才算）</span></div>
+      <div id="monthly-uptime-list"></div>
+    </section>
 
     <footer class="foot">
       🗂️ 我的服务台 · 本地私有部署 · 数据仅存于本服务器<br>
@@ -512,6 +573,7 @@
           <option value="domain">🌐 域名 / 订阅</option>
           <option value="idle">🧟 已闲置</option>
         </select>
+        <span id="cat-suggest" class="muted" style="font-size:12px"></span>
       </label>
       <label class="span2">网址<input id="f-url" placeholder="https://…"></label>
       <label class="span2">标签（逗号分隔，比如 VPS，免费；一个服务可打多个标签）<input id="f-tags" placeholder="比如 VPS，免费"></label>
@@ -570,6 +632,7 @@
     <p class="muted" style="margin:0 0 10px">只改这个服务的账号，不碰服务的名字、日期、分类。</p>
     <div id="am-list"></div>
     <div id="am-form" class="hidden">
+      <p class="muted" id="am-linked-hint" style="display:none">🔗 这是共享账号：账号和密码在侧边栏「🗝️ 账号库」里改，改完所有链接的服务都跟着变；这里只能改名称和备注。</p>
       <div class="fgrid">
         <label>账号名称<input id="am-label" placeholder="如：主号"></label>
         <label>账号<input id="am-username" placeholder="账号"></label>
@@ -611,6 +674,6 @@
 </div>
 
 <div id="toast"></div>
-<script src="/app.js?v=20261108-64"></script>
+<script src="/app.js?v=20261108-65"></script>
 </body>
 </html>

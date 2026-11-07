@@ -98,6 +98,19 @@ Pure Node.js with **zero dependencies** (no `npm install`), data lives in a sing
 - **Browser extension**: for desktop Chrome / Edge (in `browser-extension/`, an add-on in the repo): save the current page as a service in one click, and autofill accounts by domain on login pages; see `browser-extension/README.md` for how to load it
 - **Fix**: restoring a backup no longer drops multi-account data or the "abnormal" flag (restore used to keep only the default account)
 
+### What's new (v65)
+- **Shared account vault**: store an account once (sidebar "🗝️ 账号库" / Account vault) and link it from multiple services; changing the vault password updates every linked service; deleting a vault account converts linked services back to local copies (snapshot of the credentials is saved, no data loss); the accounts dialog has "从账号库选择" (pick from vault) and "存入账号库" (save to vault)
+- **Account security score**: each account gets a 0–100 score (password length + character variety − reuse − unchanged for 90+ days), shown on cards and in the accounts dialog with its weaknesses; the data center lists the 5 least secure accounts
+- **SSL certificate expiry monitoring**: the 6-hourly dead-link check also fetches each https site's certificate expiry; cards and the expiring panel show "证书 X 天后到期" (certificate expires in X days), red under 30 days
+- **Smart category suggestion**: when adding or editing a service, the category and tags are suggested from the domain and keywords (e.g. github → 开发, vps → VPS, gmail → 邮箱); one click fills them in
+- **Password rotation reminders**: accounts unchanged for 90+ days are listed in the data center ("该换密码了" — time to rotate) with service + account + last-changed date + an edit button; the daily 17:00 Telegram reminder adds a line with the count
+- **Monthly report**: auto-generated on the 1st of each month and pushed to Telegram (check-in days, total check-ins, check-in XP, most-checked-in service, new services added, expiring reminders, the 3 lowest-uptime services of the month); the data center "月度报告" panel lists the last 6 months; a "手动生成上月报告" button generates it on demand
+- **Check-in share card**: a "📤 分享我的签到" button in the data center draws a results card in the browser (canvas) — this month's check-in days, total streak days, XP, level, most-checked-in service — and downloads it as a PNG to post yourself
+- **Login history & unusual-login alerts**: every successful login is recorded (time, IP, device); settings has a "🕐 最近登录" panel with the last 10; logging in from a new IP sends a Telegram alert; the login response never returns the history
+- **Auto-archive expired services**: once a day, services expired for more than 30 days are moved to a "🗄️ 已归档" (Archived) category (created automatically if missing); archived services drop out of the check-in queue, expiring reminders, and Telegram reminders; the archived group is collapsed by default in the ledger, and moving the category back restores normal behavior
+- **iOS Shortcuts templates**: ready-made instructions in the repo's `shortcuts/` folder for two Shortcuts ("全部签到" sign all, "查今日到期" check today's expiries) — build them in the Shortcuts app following the steps, no need to open the page; checking expiries needs the browser (the API token only allows sign-in endpoints)
+- **Monthly uptime report**: a "本月可用性" panel in the data center lists services from lowest to highest uptime for the current month (rate + probe count, "无数据" when there are no probes that month); on the 1st of each month the lowest 3 go out with the monthly report on Telegram
+
 ### Backup & security
 - **Backup / restore**: one-click backup download (login password hash, Telegram token, API token, TOTP secret, sync token, and auto-sign-in headers are stripped automatically); restoring auto-saves the current data first (keeps the last 5)
 - **Export ledger**: generates a `服务台账.md` (service ledger) for easy reading

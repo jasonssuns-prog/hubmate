@@ -10,6 +10,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const zlib = require('zlib');
+const tls = require('tls');
 const { exec } = require('child_process');
 
 const PORT = Number(process.env.PORT) || 7788;
@@ -40,6 +41,11 @@ function categoriesOf(data) {
   if (Array.isArray(data.categories) && data.categories.length) return data.categories;
   return DEFAULT_CATEGORIES;
 }
+/* v65：归档分类 id 固定为 'archived'（图标 🗄️），各处按分类排除归档服务；
+   归档是分类维度的：手动把分类改回去就恢复正常 */
+const ARCHIVED_CAT_ID = 'archived';
+const ARCHIVED_CAT = { id: 'archived', label: '已归档', icon: '🗄️', cls: 't-custom' };
+function isArchived(s) { return !!s && s.category === ARCHIVED_CAT_ID; }
 function ensureCategories(data) {
   if (!Array.isArray(data.categories) || !data.categories.length) {
     data.categories = DEFAULT_CATEGORIES.map((c) => ({ ...c }));
@@ -289,7 +295,7 @@ function maxRun(dates) {
   return best;
 }
 function dailyServices(data) {
-  return data.services.filter((s) => s.checkinFrequency === 'daily' && s.category !== 'idle');
+  return data.services.filter((s) => s.checkinFrequency === 'daily' && s.category !== 'idle' && !isArchived(s));
 }
 function ensureMeta(data) {
   let dirty = false;
@@ -437,11 +443,17 @@ function loadData() {
   ensureMeta(data);
   /* 旧数据迁移：补齐排序与访问次数字段；单个账号迁成 accounts 数组 */
   let ndirty = false;
+  /* v65：新字段——共享账号库、月度报告、登录历史、归档日志；没有就补空数组 */
+  if (!Array.isArray(data.sharedAccounts)) { data.sharedAccounts = []; ndirty = true; }
+  if (!Array.isArray(data.monthlyReports)) { data.monthlyReports = []; ndirty = true; }
+  if (!Array.isArray(data.loginHistory)) { data.loginHistory = []; ndirty = true; }
+  if (!Array.isArray(data.archivedLog)) { data.archivedLog = []; ndirty = true; }
+  const vault = vaultOf(data);
   data.services.forEach((s, i) => {
     if (typeof s.sortOrder !== 'number') { s.sortOrder = i; ndirty = true; }
     if (typeof s.visits !== 'number') { s.visits = 0; ndirty = true; }
     const snap = JSON.stringify([s.accounts, s.account, s.secret]);
-    normalizeAccounts(s);
+    normalizeAccounts(s, vault);
     if (JSON.stringify([s.accounts, s.account, s.secret]) !== snap) ndirty = true;
   });
   if (ndirty) writeJSON(DATA_FILE, data);
@@ -511,7 +523,7 @@ function autoSigninOf(s) {
 /* ---------- 多账号：一个服务可存多个账号（名字/账号/密码/备注），其中一个是默认 ---------- */
 function sanitizeAccount(a) {
   if (!a || typeof a !== 'object') return null;
-  return {
+  const out = {
     id: String(a.id || crypto.randomBytes(6).toString('hex')).slice(0, 32),
     label: String(a.label || '').trim().slice(0, 30) || '账号',
     username: String(a.username || '').trim().slice(0, 200),
@@ -520,11 +532,26 @@ function sanitizeAccount(a) {
     isDefault: !!a.isDefault,
     checkins: (Array.isArray(a.checkins) ? a.checkins : []).filter((d) => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d)).slice(0, 1000).sort()
   };
+  /* v65：链接共享账号库的账号（sharedId 指向库里那条）；改密日只记 YYYY-MM-DD */
+  if (typeof a.sharedId === 'string' && a.sharedId.trim()) out.sharedId = a.sharedId.trim().slice(0, 32);
+  if (typeof a.passwordChangedAt === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(a.passwordChangedAt)) out.passwordChangedAt = a.passwordChangedAt;
+  return out;
 }
-/* 归一化：accounts 数组是唯一事实来源；account/secret 只做默认账号的镜像（兼容旧代码、CSV、台账） */
-function normalizeAccounts(svc) {
+/* 归一化：accounts 数组是唯一事实来源；account/secret 只做默认账号的镜像（兼容旧代码、CSV、台账）；
+   传了 vault（共享账号库）时，链接账号的用户名/密码/备注以库为准（快照跟库同步），库里找不到就退回成本地账号 */
+function normalizeAccounts(svc, vault) {
   if (!Array.isArray(svc.accounts)) svc.accounts = [];
   svc.accounts = svc.accounts.map(sanitizeAccount).filter(Boolean).slice(0, 20);
+  if (Array.isArray(vault)) {
+    for (const a of svc.accounts) {
+      if (!a.sharedId) continue;
+      const v = vault.find((x) => x.id === a.sharedId);
+      if (!v) { delete a.sharedId; continue; }
+      /* 链接账号以库为准的是用户名和密码（备注留在服务本地，是服务维度的） */
+      a.username = v.username; a.password = v.password;
+      if (v.passwordChangedAt) a.passwordChangedAt = v.passwordChangedAt;
+    }
+  }
   if (!svc.accounts.length && (svc.account || svc.secret)) {
     svc.accounts.push({ id: crypto.randomBytes(6).toString('hex'), label: '默认', username: String(svc.account || ''), password: String(svc.secret || ''), notes: '', isDefault: true, checkins: [] });
   }
@@ -539,6 +566,32 @@ function normalizeAccounts(svc) {
   svc.account = def ? def.username : '';
   svc.secret = def ? def.password : '';
   return svc;
+}
+/* ---------- v65：共享账号库——账号只存一份，服务里的账号可以链接它 ----------
+   服务账号带 sharedId 时，用户名/密码/备注以库里为准；库里改密码，所有链接跟着变；
+   库里删账号，链接它的服务账号自动变回本地副本（快照就是当时的账号密码，不丢数据） */
+function vaultOf(data) {
+  if (!Array.isArray(data.sharedAccounts)) data.sharedAccounts = [];
+  return data.sharedAccounts;
+}
+function sanitizeVaultAccount(v) {
+  if (!v || typeof v !== 'object') return null;
+  const out = {
+    id: String(v.id || crypto.randomBytes(6).toString('hex')).slice(0, 32),
+    label: String(v.label || '').trim().slice(0, 30) || '账号库',
+    username: String(v.username || '').trim().slice(0, 200),
+    password: String(v.password || '').slice(0, 500),
+    notes: String(v.notes || '').trim().slice(0, 200)
+  };
+  if (typeof v.passwordChangedAt === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v.passwordChangedAt)) out.passwordChangedAt = v.passwordChangedAt;
+  return out;
+}
+/* 链接账号的解析：返回以库为准的账号副本；库里找不到就返回 null（当成本地账号） */
+function resolveVaultAccount(vault, a) {
+  if (!a || !a.sharedId || !Array.isArray(vault)) return null;
+  const v = vault.find((x) => x.id === a.sharedId);
+  if (!v) return null;
+  return { ...a, username: v.username, password: v.password, passwordChangedAt: v.passwordChangedAt || a.passwordChangedAt };
 }
 /* v62：自定义字段——每服务最多 10 个键值对，字段名 ≤20 字、值 ≤200 字，同名字段只留第一个 */
 function sanitizeCustomFields(v) {
@@ -556,7 +609,7 @@ function sanitizeCustomFields(v) {
   }
   return out;
 }
-function pickFields(b, existing, catIds) {
+function pickFields(b, existing, catIds, vault) {
   const out = {};
   if (typeof b.name === 'string') out.name = b.name.trim().slice(0, 100);
   if (b.category !== undefined) out.category = (catIds || []).includes(b.category) ? b.category : 'relay';
@@ -599,6 +652,21 @@ function pickFields(b, existing, catIds) {
         const old = existingById.get(s.id);
         if (Array.isArray(old.checkins)) s.checkins = old.checkins.filter((d) => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d)).slice(0, 1000).sort();
       }
+      /* v65：链接账号以库为准——客户端传来的用户名/密码不认，只认库里那条；
+         库里没有这个 id 就退回成本地账号（快照就是传来的值，不丢数据） */
+      if (s.sharedId && Array.isArray(vault)) {
+        const v = vault.find((x) => x.id === s.sharedId);
+        if (v) {
+          s.username = v.username; s.password = v.password;
+          if (v.passwordChangedAt) s.passwordChangedAt = v.passwordChangedAt;
+        } else delete s.sharedId;
+      }
+      /* v65：改密日——本地账号密码变了（或新账号）就记今天；没变就沿用旧的；链接账号跟库走 */
+      if (!s.sharedId) {
+        const old = existingById.get(s.id);
+        if (!old || old.password !== s.password) s.passwordChangedAt = todayStr();
+        else if (old.passwordChangedAt) s.passwordChangedAt = old.passwordChangedAt;
+      }
       return s;
     }).filter(Boolean).slice(0, 20);
     const def = out.accounts.find((a) => a.isDefault) || out.accounts[0];
@@ -610,10 +678,12 @@ function pickFields(b, existing, catIds) {
     const username = typeof b.account === 'string' ? b.account.trim().slice(0, 200) : (acc ? acc.username : '');
     const password = typeof b.secret === 'string' ? b.secret.slice(0, 500) : (acc ? acc.password : '');
     if (acc) {
+      /* v65：旧式单账号改密码也记改密日 */
+      if (!acc.sharedId && acc.password !== password) acc.passwordChangedAt = todayStr();
       acc.username = username; acc.password = password;
       out.accounts = base;
     } else {
-      out.accounts = [{ id: crypto.randomBytes(6).toString('hex'), label: '默认', username, password, notes: '', isDefault: true }];
+      out.accounts = [{ id: crypto.randomBytes(6).toString('hex'), label: '默认', username, password, notes: '', isDefault: true, passwordChangedAt: password ? todayStr() : undefined }];
     }
     out.account = username;
     out.secret = password;
@@ -789,7 +859,7 @@ function daysUntilSrv(dateStr) {
 }
 function expiringList(data) {
   return data.services
-    .filter((s) => s.expiresAt && daysUntilSrv(s.expiresAt) <= 30)
+    .filter((s) => s.expiresAt && daysUntilSrv(s.expiresAt) <= 30 && !isArchived(s))
     .map((s) => ({ s, d: daysUntilSrv(s.expiresAt) }))
     .sort((a, b) => a.d - b.d);
 }
@@ -880,6 +950,10 @@ function checkinLines(todo) {
    注意：绝不在启动时立即发——每次部署都会重启服务，启动即发等于部署就骚扰一次。 */
 async function runNotifyChecks() {
   try {
+    /* v65：到期自动归档（每天一次）+ 月度报告（每月 1 号）——不依赖通知渠道，没配 Telegram 也照常跑；
+       先跑它们，再读盘做提醒，这样提醒用的数据已经是归档/生成后的最新状态 */
+    archiveExpiredIfDue();
+    await monthlyReportIfDue();
     const data = loadData();
     const n = notifyCfg(data);
     /* v62：任一渠道配好了就跑，不再只认 Telegram */
@@ -911,8 +985,11 @@ async function runNotifyChecks() {
       const todo = unsignedDaily(data, t);
       let ok = true;
       if (todo.length) {
+        /* v65：密码轮换提醒——每天 17:00 的签到提醒里加一句（有 N 个账号密码超 90 天没换） */
+        const stale = stalePasswordAccounts(data);
+        const rotLine = stale.length ? `\n\n🔑 另有 ${stale.length} 个账号密码超过 90 天没换，建议轮换一下。` : '';
         ok = await tryPush(`服务台签到提醒 · ${t}`,
-          `⚡ <b>服务台签到提醒</b> · ${t}\n今日还有 ${todo.length} 个站未签到：\n\n${checkinLines(todo).join('\n')}\n\n👉 点下面按钮直接签完，别断了连签。`, CHECKIN_KB);
+          `⚡ <b>服务台签到提醒</b> · ${t}\n今日还有 ${todo.length} 个站未签到：\n\n${checkinLines(todo).join('\n')}${rotLine}\n\n👉 点下面按钮直接签完，别断了连签。`, CHECKIN_KB);
       }
       if (ok) { n.lastCheckin = t; n.lastCheckinRepeatAt = Date.now(); dirty = true; }
     }
@@ -1070,18 +1147,172 @@ async function probeLink(u) {
     return 'dead';
   } catch { return 'dead'; }
 }
+/* ---------- v65：纯函数 + 每日/每月任务（月度报告、月度可用性、密码轮换、到期自动归档、SSL 证书） ---------- */
+/* 密码轮换——超过 90 天没换密码的账号（有改密日才算，没记的按“未知”不算）；链接账号跟库里的改密日 */
+function stalePasswordAccounts(data) {
+  const vault = vaultOf(data);
+  const d = cstNow();
+  d.setUTCDate(d.getUTCDate() - 90);
+  const cutoff = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+  const out = [];
+  for (const s of data.services) {
+    for (const a of serviceAccounts(s)) {
+      const acc = resolveVaultAccount(vault, a) || a;
+      const ch = acc.passwordChangedAt;
+      if (!ch || typeof ch !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(ch)) continue;
+      if (ch < cutoff) out.push({ service: s.name, serviceId: s.id, accountId: a.id, label: a.label || '', username: acc.username || '', changedAt: ch });
+    }
+  }
+  return out.sort((a, b) => a.changedAt.localeCompare(b.changedAt));
+}
+/* 月度可用性——按 linkHistory 算每个服务当月的在线率；当月没探测记录的 rate=null（无数据）；
+   月份边界按北京时间算（UTC 月初往前推 8 小时） */
+function monthlyUptime(data, ym) {
+  const [y, m] = ym.split('-').map(Number);
+  const start = Date.UTC(y, m - 1, 1) - 8 * 3600e3;
+  const end = Date.UTC(y, m, 1) - 8 * 3600e3;
+  return data.services.map((s) => {
+    const hist = (Array.isArray(s.linkHistory) ? s.linkHistory : []).filter((h) => h && typeof h.t === 'number' && h.t >= start && h.t < end && typeof h.ok === 'boolean');
+    if (!hist.length) return { id: s.id, name: s.name, rate: null, probes: 0 };
+    const ok = hist.filter((h) => h.ok).length;
+    return { id: s.id, name: s.name, rate: Math.round((ok / hist.length) * 100), probes: hist.length };
+  });
+}
+/* 月度报告——纯函数（data 是当月 1 号那天的数据，ym 是上个月 'YYYY-MM'）；
+   签到天数/总次数/签到攒的经验（每天首次 +5、全勤 +10，都记在 history 里）、最常签到的服务、
+   新增服务数（createdAt 为准，老服务没有 createdAt 就按注册/购买日期算）、本月到期数、
+   本月自动归档数、本月在线率最低的 3 个服务 */
+function buildMonthlyReport(data, ym) {
+  const hist = data.history || {};
+  let days = 0, totalCk = 0, xp = 0;
+  for (const [d, h] of Object.entries(hist)) {
+    if (!d.startsWith(ym + '-')) continue;
+    if ((h.c || 0) > 0) days++;
+    totalCk += (h.c || 0);
+    xp += (h.x || 0) + (h.all ? 10 : 0);
+  }
+  let top = '', topN = 0, added = 0, expiring = 0;
+  for (const s of data.services) {
+    const n = (s.checkins || []).filter((d) => d.startsWith(ym + '-')).length;
+    if (n > topN) { topN = n; top = s.name; }
+    const created = (typeof s.createdAt === 'string' && s.createdAt) || s.registeredAt || '';
+    if (created.startsWith(ym + '-')) added++;
+    if (typeof s.expiresAt === 'string' && s.expiresAt.startsWith(ym + '-')) expiring++;
+  }
+  const up = monthlyUptime(data, ym);
+  const lowestUptime = up.filter((u) => u.rate !== null).sort((a, b) => a.rate - b.rate).slice(0, 3)
+    .map((u) => ({ name: u.name, rate: u.rate, probes: u.probes }));
+  const archived = (Array.isArray(data.archivedLog) ? data.archivedLog : []).filter((a) => typeof a.at === 'string' && a.at.startsWith(ym + '-')).length;
+  return { ym, days, totalCk, xp, top, topN, added, expiring, archived, lowestUptime };
+}
+function monthlyReportText(rep) {
+  const lines = [
+    `📊 <b>服务台月度报告 · ${rep.ym}</b>`,
+    `签到 ${rep.days} 天 · 共 ${rep.totalCk} 次 · 攒了 ${rep.xp}⚡`,
+    rep.top ? `最常签到：${escHtml(rep.top)}（${rep.topN} 次）` : '最常签到：—',
+    `新增服务 ${rep.added} 个 · 本月到期 ${rep.expiring} 个 · 自动归档 ${rep.archived} 个`,
+  ];
+  if (rep.lowestUptime && rep.lowestUptime.length) {
+    lines.push(`本月在线率最低：${rep.lowestUptime.map((u) => `${escHtml(u.name)} ${u.rate}%`).join('、')}`);
+  }
+  return lines.join('\n');
+}
+/* 每月 1 号生成上月报告并推一次；没配通知渠道也照常生成存盘（只留最近 12 条），下次 1 号前不重复 */
+async function monthlyReportIfDue() {
+  try {
+    const data = loadData();
+    const t = todayStr();
+    if (Number(t.split('-')[2]) !== 1) return;
+    const [cy, cm] = t.split('-').map(Number);
+    const prevYm = cm === 1 ? `${cy - 1}-12` : `${cy}-${String(cm - 1).padStart(2, '0')}`;
+    data.flags = data.flags || {};
+    if (data.flags.lastMonthlyReport === prevYm) return;
+    const rep = buildMonthlyReport(data, prevYm);
+    data.monthlyReports = (Array.isArray(data.monthlyReports) ? data.monthlyReports : []).filter((r) => r.ym !== prevYm);
+    data.monthlyReports.push(rep);
+    if (data.monthlyReports.length > 12) data.monthlyReports = data.monthlyReports.slice(-12);
+    data.flags.lastMonthlyReport = prevYm;
+    writeJSON(DATA_FILE, data);
+    const n = notifyCfg(data);
+    if ((n.token && n.chatId) || n.webhookUrl || n.barkKey || n.serverChanKey) {
+      await sendMultiChannel(n, `服务台月度报告 · ${prevYm}`, monthlyReportText(rep)).catch(() => {});
+    }
+    console.log(`[monthly-report] 已生成 ${prevYm} 月度报告`);
+  } catch (e) { console.error('[!] 月度报告异常:', e.message); }
+}
+/* 到期自动归档——到期超 30 天没续的服务，分类改成“已归档”；
+   归档的服务不进签到队列/临期提醒（dailyServices 和 expiringList 都按分类排除）；
+   已闲置的不动（已经在边上了）；用户手动把分类改回去就恢复正常。
+   归档记录记在 archivedLog 里（只留最近 50 条），不往服务备注里写 */
+function archiveExpired(data, t) {
+  const todo = [];
+  for (const s of data.services) {
+    if (isArchived(s) || s.category === 'idle') continue;
+    if (!s.expiresAt || !/^\d{4}-\d{2}-\d{2}$/.test(s.expiresAt)) continue;
+    if (daysUntilSrv(s.expiresAt) < -30) todo.push(s);
+  }
+  if (!todo.length) return [];
+  const cats = ensureCategories(data);
+  if (!cats.some((c) => c.id === ARCHIVED_CAT_ID)) cats.push({ ...ARCHIVED_CAT });
+  const done = todo.map((s) => { s.category = ARCHIVED_CAT_ID; return { id: s.id, name: s.name, at: t }; });
+  data.archivedLog = (Array.isArray(data.archivedLog) ? data.archivedLog : []).concat(done).slice(-50);
+  return done;
+}
+/* 每天跑一次（放在每小时的提醒检查里）；没配通知渠道也照常归档 */
+function archiveExpiredIfDue() {
+  try {
+    const data = loadData();
+    const t = todayStr();
+    data.flags = data.flags || {};
+    if (data.flags.lastArchiveCheck === t) return;
+    const done = archiveExpired(data, t);
+    data.flags.lastArchiveCheck = t;
+    writeJSON(DATA_FILE, data);
+    if (done.length) console.log(`[archive] 自动归档 ${done.length} 个过期服务`);
+  } catch (e) { console.error('[!] 自动归档异常:', e.message); }
+}
+/* SSL 证书到期——对 https 的站取证书到期日（10 秒超时，失败就跳过，不影响死链检测） */
+function getCertExpiry(hostname) {
+  return new Promise((resolve) => {
+    try {
+      const socket = tls.connect({ host: hostname, port: 443, servername: hostname, timeout: 10000 });
+      const done = (v) => { try { socket.destroy(); } catch {} resolve(v); };
+      socket.once('error', () => done(null));
+      socket.once('timeout', () => done(null));
+      socket.once('secureConnect', () => {
+        try {
+          const cert = socket.getPeerCertificate();
+          const exp = cert && cert.valid_to ? new Date(cert.valid_to) : null;
+          if (!exp || Number.isNaN(exp.getTime())) return done(null);
+          const d = new Date(exp.getTime() + 8 * 3600e3);
+          done(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`);
+        } catch { done(null); }
+      });
+    } catch { resolve(null); }
+  });
+}
+
 async function checkLinks() {
   try {
     const data = loadData();
     const t = todayStr();
     const now = Date.now();
-    const results = await Promise.all(data.services.map(async (s) => ({ id: s.id, st: await probeLink(s.url) })));
+    const results = await Promise.all(data.services.map(async (s) => {
+      const st = await probeLink(s.url);
+      /* v65：https 的站顺手取证书到期日（失败就跳过，不影响死链结论） */
+      let cert = null;
+      const u = normLinkUrl(s.url);
+      if (u.startsWith('https://')) {
+        try { cert = await getCertExpiry(new URL(u).hostname); } catch { cert = null; }
+      }
+      return { id: s.id, st, cert };
+    }));
     /* 探活要等网络，期间用户可能改过数据：写回前重新读盘，只合并 linkStatus 和 linkHistory，
        绝不把探活开始时的整盘快照写回去盖掉别人的改动（删掉的服务跳过）；
        v59：每次探活都记一笔（ok=通，dead=不通，unknown 不记——结论不明不算），只留最近 120 条（约 30 天） */
     const fresh = loadData();
     let changed = false;
-    for (const { id, st } of results) {
+    for (const { id, st, cert } of results) {
       const s = fresh.services.find((x) => x.id === id);
       if (!s) continue;
       if (s.linkStatus !== st) { s.linkStatus = st; s.linkCheckedAt = t; changed = true; }
@@ -1091,6 +1322,12 @@ async function checkLinks() {
         if (s.linkHistory.length > 120) s.linkHistory = s.linkHistory.slice(-120);
         changed = true;
       }
+      /* v65：证书到期日——取到了才记；到期日变了（或第一次记）才写盘，免得每 6 小时无意义刷数据 */
+      if (cert && (s.certExpiresAt !== cert || !s.certCheckedAt)) {
+        s.certExpiresAt = cert;
+        s.certCheckedAt = t;
+        changed = true;
+      }
     }
     if (changed) writeJSON(DATA_FILE, fresh);
     return {
@@ -1098,6 +1335,7 @@ async function checkLinks() {
       dead: results.filter((r) => r.st === 'dead').length,
       ok: results.filter((r) => r.st === 'ok').length,
       unknown: results.filter((r) => r.st === 'unknown').length,
+      certs: results.filter((r) => r.cert).length,
       changed
     };
   } catch (e) { console.error('[!] 链接检测异常:', e.message); return null; }
@@ -1364,6 +1602,17 @@ async function handleAPI(req, res, pathname) {
     const sessions = loadSessions();
     sessions[token] = { created: Date.now() };
     saveSessions(sessions);
+    /* v65：登录历史——每次成功登录记一条（时间、IP、UA），只留最近 50 条；
+       本次 IP 和上次不同、且配了 Telegram 时发一次异地登录提醒（不拦登录，提醒失败也不报错） */
+    const prevLogin = (Array.isArray(data.loginHistory) ? data.loginHistory : []).slice(-1)[0];
+    data.loginHistory = (Array.isArray(data.loginHistory) ? data.loginHistory : []).concat([{ at: cstDateTime(), ip, ua: String(req.headers['user-agent'] || '').slice(0, 300) }]).slice(-50);
+    writeJSON(DATA_FILE, data);
+    if (prevLogin && prevLogin.ip && prevLogin.ip !== ip) {
+      const n = notifyCfg(data);
+      if (n.token && n.chatId) {
+        tgSend(n.token, n.chatId, `🔐 <b>服务台异地登录提醒</b>\n你的账号在新 IP ${escHtml(ip)} 登录（${cstDateTime()}）。\n如果不是你本人，请立即改密码。`).catch(() => {});
+      }
+    }
     /* 反代 + HTTPS 时给 Cookie 加 Secure */
     const secure = TRUST_PROXY && String(req.headers['x-forwarded-proto'] || '').includes('https');
     return send(200, { ok: true, username: data.username }, {
@@ -1456,7 +1705,9 @@ async function handleAPI(req, res, pathname) {
       try { host = new URL(/^https?:\/\//i.test(s.url || '') ? s.url : 'https://' + (s.url || '')).hostname.toLowerCase().replace(/^www\./, ''); } catch { continue; }
       if (!host || !(host === dom || host.endsWith('.' + dom))) continue;
       for (const a of serviceAccounts(s)) {
-        out.push({ serviceId: s.id, serviceName: s.name, label: a.label || '', username: a.username || '', password: a.password || '', url: s.url || '' });
+        /* v65：链接账号返回库里的用户名/密码（以库为准） */
+        const acc = resolveVaultAccount(vaultOf(data), a) || a;
+        out.push({ serviceId: s.id, serviceName: s.name, label: a.label || '', username: acc.username || '', password: acc.password || '', url: s.url || '' });
       }
       if (out.length >= 20) break;
     }
@@ -1472,6 +1723,97 @@ async function handleAPI(req, res, pathname) {
   if (pathname === '/api/api-token/status' && req.method === 'GET') {
     const data = loadData();
     return send(200, { hasToken: !!data.apiToken });
+  }
+  /* v65：共享账号库——账号只存一份；服务账号带 sharedId 就是链接它（以库为准）；
+     库里改密码，所有链接跟着变；库里删账号，链接的服务账号自动变回本地副本。
+     密码只在登录后返回（和服务账号同口径），公开接口里永远没有库里的密码 */
+  if (pathname === '/api/vault' && req.method === 'GET') {
+    const data = loadData();
+    const vault = vaultOf(data);
+    const counts = {};
+    for (const s of data.services) for (const a of serviceAccounts(s)) if (a.sharedId) counts[a.sharedId] = (counts[a.sharedId] || 0) + 1;
+    return send(200, { ok: true, accounts: vault.map((v) => ({ ...v, linked: counts[v.id] || 0 })) });
+  }
+  if (pathname === '/api/vault' && req.method === 'POST') {
+    const body = await jsonBody(req);
+    const data = loadData();
+    const vault = vaultOf(data);
+    const v = sanitizeVaultAccount(body);
+    if (!v || !v.username) return send(400, { error: '账号不能为空' });
+    v.id = crypto.randomBytes(6).toString('hex');
+    if (v.password) v.passwordChangedAt = todayStr();
+    vault.push(v);
+    writeJSON(DATA_FILE, data);
+    return send(200, { ok: true, account: v });
+  }
+  const vm = pathname.match(/^\/api\/vault\/([A-Za-z0-9_-]+)$/);
+  if (vm && req.method === 'PUT') {
+    const body = await jsonBody(req);
+    const data = loadData();
+    const vault = vaultOf(data);
+    const v = vault.find((x) => x.id === vm[1]);
+    if (!v) return send(404, { error: '找不到该账号' });
+    const next = sanitizeVaultAccount({ ...v, ...body, id: v.id });
+    if (!next || !next.username) return send(400, { error: '账号不能为空' });
+    /* 密码变了就记今天为改密日；没变就沿用旧的 */
+    if (next.password !== v.password) next.passwordChangedAt = todayStr();
+    else if (v.passwordChangedAt) next.passwordChangedAt = v.passwordChangedAt;
+    Object.assign(v, next);
+    /* 库里改了，所有链接它的服务账号快照跟着同步（读时也以库为准，这里是双保险） */
+    for (const s of data.services) {
+      for (const a of serviceAccounts(s)) {
+        if (a.sharedId === v.id) { a.username = v.username; a.password = v.password; if (v.passwordChangedAt) a.passwordChangedAt = v.passwordChangedAt; }
+      }
+      normalizeAccounts(s, vault);
+    }
+    writeJSON(DATA_FILE, data);
+    return send(200, { ok: true, account: v });
+  }
+  if (vm && req.method === 'DELETE') {
+    const data = loadData();
+    const vault = vaultOf(data);
+    const idx = vault.findIndex((x) => x.id === vm[1]);
+    if (idx < 0) return send(404, { error: '找不到该账号' });
+    const v = vault[idx];
+    /* 删库账号：链接它的服务账号变回本地副本（快照就是库里的账号密码，不丢数据） */
+    for (const s of data.services) {
+      for (const a of serviceAccounts(s)) {
+        if (a.sharedId === v.id) { delete a.sharedId; a.username = v.username; a.password = v.password; if (v.passwordChangedAt) a.passwordChangedAt = v.passwordChangedAt; }
+      }
+      normalizeAccounts(s, vault);
+    }
+    vault.splice(idx, 1);
+    writeJSON(DATA_FILE, data);
+    return send(200, { ok: true });
+  }
+  /* v65：最近登录——列出最近 10 条登录记录（时间、IP、UA 原文，设备由前端按 UA 粗取） */
+  if (pathname === '/api/login-history' && req.method === 'GET') {
+    const data = loadData();
+    const list = (Array.isArray(data.loginHistory) ? data.loginHistory : []).slice(-10).reverse();
+    return send(200, { ok: true, logins: list });
+  }
+  /* v65：月度报告——存在 monthlyReports 里（每月一条，只留最近 12 条）；
+     每月 1 号自动生成上月报告并推 Telegram；这里可以手动生成/查看最近 6 条 */
+  if (pathname === '/api/monthly-reports' && req.method === 'GET') {
+    const data = loadData();
+    const list = (Array.isArray(data.monthlyReports) ? data.monthlyReports : []).slice().sort((a, b) => String(b.ym).localeCompare(String(a.ym))).slice(0, 6);
+    return send(200, { ok: true, reports: list });
+  }
+  if (pathname === '/api/monthly-report/generate' && req.method === 'POST') {
+    const body = await jsonBody(req);
+    const data = loadData();
+    let ym = String(body.ym || '').trim();
+    if (!/^\d{4}-\d{2}$/.test(ym)) {
+      const t = todayStr();
+      const [cy, cm] = t.split('-').map(Number);
+      ym = cm === 1 ? `${cy - 1}-12` : `${cy}-${String(cm - 1).padStart(2, '0')}`;
+    }
+    const rep = buildMonthlyReport(data, ym);
+    data.monthlyReports = (Array.isArray(data.monthlyReports) ? data.monthlyReports : []).filter((r) => r.ym !== ym);
+    data.monthlyReports.push(rep);
+    if (data.monthlyReports.length > 12) data.monthlyReports = data.monthlyReports.slice(-12);
+    writeJSON(DATA_FILE, data);
+    return send(200, { ok: true, report: rep });
   }
   if (pathname === '/api/api-token' && req.method === 'POST') {
     const data = loadData();
@@ -1720,6 +2062,8 @@ async function handleAPI(req, res, pathname) {
     const cats = ensureCategories(data);
     const label = String(body.label || '').trim().slice(0, 20);
     if (!label) return send(400, { error: '分类名不能为空' });
+    /* v65：“已归档”是系统保留的归档分类名，不能自己新建 */
+    if (label === '已归档') return send(400, { error: '“已归档”是系统保留的归档分类名' });
     if (cats.some((c) => c.label.toLowerCase() === label.toLowerCase())) return send(400, { error: '已经有同名分类了' });
     const cat = { id: 'c' + crypto.randomBytes(4).toString('hex'), label, icon: cleanIcon(body.icon), cls: 't-custom' };
     cats.push(cat);
@@ -1736,13 +2080,16 @@ async function handleAPI(req, res, pathname) {
     const label = String(body.label || '').trim().slice(0, 20);
     if (!label) return send(400, { error: '分类名不能为空' });
     if (cats.some((c) => c.id !== cat.id && c.label.toLowerCase() === label.toLowerCase())) return send(400, { error: '已经有同名分类了' });
+    /* v65：“已归档”是系统保留的归档分类名，别的分类不能改成这个名字 */
+    if (label === '已归档' && cat.id !== ARCHIVED_CAT_ID) return send(400, { error: '“已归档”是系统保留的归档分类名' });
     cat.label = label;
     if (body.icon !== undefined) cat.icon = cleanIcon(body.icon);
     writeJSON(DATA_FILE, data);
     return send(200, { ok: true, category: cat });
   }
   if (cm && req.method === 'DELETE') {
-    if (BUILTIN_CATS.has(cm[1])) return send(400, { error: '系统分类不能删除' });
+    /* v65：归档分类也是系统分类，不能删（删了归档的服务就没地方去了） */
+    if (BUILTIN_CATS.has(cm[1]) || cm[1] === ARCHIVED_CAT_ID) return send(400, { error: '系统分类不能删除' });
     const data = loadData();
     const cats = ensureCategories(data);
     const idx = cats.findIndex((c) => c.id === cm[1]);
@@ -1837,16 +2184,28 @@ async function handleAPI(req, res, pathname) {
       tags: (Array.isArray(s.tags) ? s.tags : []).map((t) => String(t).trim().slice(0, 20)).filter(Boolean).slice(0, 10),
       customFields: sanitizeCustomFields(s.customFields),
       autoSignin: sanitizeAutoSignin(s.autoSignin),
-      autoSigninLast: (s.autoSigninLast && typeof s.autoSigninLast === 'object') ? { at: String(s.autoSigninLast.at || '').slice(0, 30), ok: !!s.autoSigninLast.ok, status: Number(s.autoSigninLast.status) || 0, note: String(s.autoSigninLast.note || '').slice(0, 200) } : undefined
+      autoSigninLast: (s.autoSigninLast && typeof s.autoSigninLast === 'object') ? { at: String(s.autoSigninLast.at || '').slice(0, 30), ok: !!s.autoSigninLast.ok, status: Number(s.autoSigninLast.status) || 0, note: String(s.autoSigninLast.note || '').slice(0, 200) } : undefined,
+      /* v65：证书到期日、建站日期也随备份恢复 */
+      certExpiresAt: /^\d{4}-\d{2}-\d{2}$/.test(s.certExpiresAt || '') ? s.certExpiresAt : undefined,
+      certCheckedAt: /^\d{4}-\d{2}-\d{2}$/.test(s.certCheckedAt || '') ? s.certCheckedAt : undefined,
+      createdAt: /^\d{4}-\d{2}-\d{2}$/.test(s.createdAt || '') ? s.createdAt : undefined
     }));
+    /* v65：先恢复共享账号库，再归一化账号——链接账号要按库解析（库里没有就退回成本地副本） */
+    if (Array.isArray(imp.sharedAccounts)) {
+      data.sharedAccounts = imp.sharedAccounts.map(sanitizeVaultAccount).filter(Boolean).slice(0, 200);
+    }
     /* v62：恢复后归一化账号——默认账号的镜像（account/secret）跟恢复回来的 accounts 走，
        不然旧备份里只有镜像、没有 accounts 数组的服务会丢账号 */
-    data.services.forEach(normalizeAccounts);
+    data.services.forEach((s) => normalizeAccounts(s, vaultOf(data)));
     data.categories = cats.map((c) => ({ id: c.id, label: String(c.label).slice(0, 20), icon: cleanIcon(c.icon), cls: c.cls || 't-custom' }));
     if (imp.history && typeof imp.history === 'object') data.history = imp.history;
     if (imp.achievements && typeof imp.achievements === 'object') data.achievements = imp.achievements;
     if (Number(imp.xp) >= 0) data.xp = Number(imp.xp);
     if (imp.flags && typeof imp.flags === 'object') data.flags = imp.flags;
+    /* v65：月度报告、登录历史、归档日志也随备份恢复（都是用户自己的数据，不含密钥） */
+    if (Array.isArray(imp.monthlyReports)) data.monthlyReports = imp.monthlyReports.filter((r) => r && typeof r.ym === 'string').slice(-12);
+    if (Array.isArray(imp.loginHistory)) data.loginHistory = imp.loginHistory.filter((h) => h && typeof h.at === 'string').slice(-50);
+    if (Array.isArray(imp.archivedLog)) data.archivedLog = imp.archivedLog.filter((a) => a && typeof a.at === 'string').slice(-50);
     if (imp.notify && typeof imp.notify === 'object') {
       const n = notifyCfg(data);
       /* v62：Token、Webhook 地址、Bark Key、Server酱 Key 永远沿用当前值，不被备份盖掉 */
@@ -1871,13 +2230,15 @@ async function handleAPI(req, res, pathname) {
   }
   if (pathname === '/api/services' && req.method === 'POST') {
     const data = loadData();
-    const f = pickFields(await jsonBody(req), null, categoriesOf(data).map((c) => c.id));
+    const f = pickFields(await jsonBody(req), null, categoriesOf(data).map((c) => c.id), vaultOf(data));
     if (!f.name) return send(400, { error: '名称必填' });
     const svc = Object.assign({
       id: crypto.randomBytes(12).toString('hex'),
       category: 'relay',
       url: '', account: '', secret: '', price: '', notes: '',
       registeredAt: todayStr(), expiresAt: '',
+      /* v65：建站日期（月度报告里“新增服务数”按它算；续期改 registeredAt 时它不动） */
+      createdAt: todayStr(),
       checkinFrequency: 'none', checkinEveryDays: 1, renewDays: 365, checkins: [],
       visits: 0,
       sortOrder: Math.min(0, ...data.services.map((s) => s.sortOrder ?? 0)) - 1 // 新服务排最前
@@ -1900,7 +2261,7 @@ async function handleAPI(req, res, pathname) {
     let maxOrder = data.services.reduce((m, s) => Math.max(m, s.sortOrder ?? 0), 0);
     let imported = 0;
     for (const r of rows) {
-      const f = pickFields(r || {}, null, catIds);
+      const f = pickFields(r || {}, null, catIds, vaultOf(data));
       if (!f.name) continue;
       const svc = Object.assign({
         id: crypto.randomBytes(12).toString('hex'),
@@ -1934,7 +2295,7 @@ async function handleAPI(req, res, pathname) {
     let maxOrder = data.services.reduce((m, s) => Math.max(m, s.sortOrder ?? 0), 0);
     let imported = 0, dupes = 0;
     for (const r of rows) {
-      const f = pickFields(r || {}, null, catIds);
+      const f = pickFields(r || {}, null, catIds, vaultOf(data));
       if (!f.name) continue;
       const nu = normUrl(f.url);
       if (nu && seenUrls.has(nu)) { dupes++; continue; }
@@ -1987,11 +2348,13 @@ async function handleAPI(req, res, pathname) {
         label: r.label, username: r.username, password: r.password, notes: r.notes
       });
       if (!acc || !acc.username) continue;
-      normalizeAccounts(svc);
+      /* v65：新导入的账号，改密日记今天（密码是新录入的） */
+      if (acc.password) acc.passwordChangedAt = todayStr();
+      normalizeAccounts(svc, vaultOf(data));
       if (svc.accounts.some((a) => String(a.username || '').trim().toLowerCase() === acc.username.toLowerCase())) { dupes++; continue; }
       acc.isDefault = svc.accounts.length === 0;
       svc.accounts.push(acc);
-      normalizeAccounts(svc);
+      normalizeAccounts(svc, vaultOf(data));
       imported++;
     }
     if (imported) writeJSON(DATA_FILE, data);
@@ -2172,6 +2535,9 @@ async function handleAPI(req, res, pathname) {
         sortOrder: maxOrder + 1,
         linkStatus: undefined,
         linkCheckedAt: undefined,
+        /* v65：副本是新服务——建站日期记今天，探测历史不清零会把原服务的在线率带过来 */
+        createdAt: todayStr(),
+        linkHistory: [],
         renewHistory: [],
         prevRenew: undefined,
         prevExpiresAt: undefined,
@@ -2196,7 +2562,7 @@ async function handleAPI(req, res, pathname) {
     }
     if (req.method === 'PUT' && !m[2]) {
       const body = await jsonBody(req);
-      Object.assign(svc, pickFields(body, svc, categoriesOf(data).map((c) => c.id)));
+      Object.assign(svc, pickFields(body, svc, categoriesOf(data).map((c) => c.id), vaultOf(data)));
       /* 手动改了到期日或开始时间，之前的续期快照就作废，免得撤回续期把手改的日期盖回去 */
       if (typeof body.expiresAt === 'string' || typeof body.registeredAt === 'string') { delete svc.prevRenew; delete svc.prevExpiresAt; }
       writeJSON(DATA_FILE, data);
