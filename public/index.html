@@ -11,7 +11,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="apple-touch-icon" href="/icon-180.png">
-<link rel="stylesheet" href="/style.css?v=20261107-61">
+<link rel="stylesheet" href="/style.css?v=20261107-62">
 </head>
 <body class="mode-preview" data-theme="neon">
 
@@ -137,6 +137,10 @@
         <button id="btn-acc-export" class="btn ghost small live-only" title="把全部账号导出为 CSV（可导进密码管理器；文件里含密码，妥善保管）">🔐 账号导出</button>
         <button id="btn-csv-import" class="btn ghost small live-only" title="从 CSV 表格批量导入服务">📥 CSV 导入</button>
         <input type="file" id="csv-file" accept=".csv,text/csv" class="hidden">
+        <button id="btn-bookmark-import" class="btn ghost small live-only" title="从浏览器导出的书签 HTML 批量导入服务（同网址已存在就跳过）">🔖 书签导入</button>
+        <input type="file" id="bookmark-file" accept=".html,.htm,text/html" class="hidden">
+        <button id="btn-acc-import" class="btn ghost small live-only" title="从 CSV 批量导入账号（按服务名匹配已有服务）">🔐 账号导入</button>
+        <input type="file" id="acc-csv-file" accept=".csv,text/csv" class="hidden">
         <button id="btn-linkcheck" class="btn ghost small live-only" title="逐个探活，疑似失效的标在卡片上">🔗 检测链接</button>
         <button id="btn-pass" class="btn ghost small live-only">🔑 改密码</button>
         <button id="btn-logout" class="btn ghost small live-only">🚪 退出</button>
@@ -248,7 +252,7 @@
         <h2>🔔 通知设置</h2>
         <span id="notify-status" class="muted"></span>
       </div>
-      <div class="help-fold"><button class="help-toggle" type="button">📖 说明 ▾</button><div class="help-body"><p class="muted">通过 Telegram 机器人推送提醒。Token 只存在你的服务器上，设置页不会把它显示出来；两个开关各管一种提醒，每天到你设定的时间后各推一次，有事才推，没事不打扰。签到提醒还可以在固定时间后每隔几小时重复推一次（23 点后不推，签完即停），间隔填 0 表示不重复。注意：沙箱休眠时推送会暂停，醒来后补推。机器人还支持 /today、/expiring 命令查询。</p></div></div>
+      <div class="help-fold"><button class="help-toggle" type="button">📖 说明 ▾</button><div class="help-body"><p class="muted">通过 Telegram 机器人推送提醒。Token 只存在你的服务器上，设置页不会把它显示出来；两个开关各管一种提醒，每天到你设定的时间后各推一次，有事才推，没事不打扰。签到提醒还可以在固定时间后每隔几小时重复推一次（23 点后不推，签完即停），间隔填 0 表示不重复。注意：沙箱休眠时推送会暂停，醒来后补推。机器人还支持 /today、/expiring 命令查询。除了 Telegram，还能同时推到 Webhook（POST JSON 到你填的地址）、Bark（iPhone 推送）和 Server酱（微信推送），三个渠道都可选配，密钥只存服务端，测试按钮会逐个渠道告诉你发没发出去。</p></div></div>
       <div class="fgrid">
         <label class="span2">Bot Token（@BotFather 处获取）<input id="n-token" type="password" autocomplete="off" placeholder="留空表示不改；首次设置必填"></label>
         <label class="span2">Chat ID<input id="n-chat" placeholder="数字 ID，或先保存 Token 后点“自动获取”"></label>
@@ -256,7 +260,11 @@
         <label><input id="n-checkin" type="checkbox" style="width:auto"> ⚡ 每日签到提醒（还有未签时）</label>
         <label>每天几点后推送（北京时间，0–23）<input id="n-pushhour" type="number" min="0" max="23" step="1" value="9"></label>
         <label>签到未完成时，每隔几小时再推一次（0 表示不重复）<input id="n-repeat" type="number" min="0" max="24" step="1" value="0"></label>
+        <label class="span2">Webhook 地址（可选，提醒会 POST 一份 JSON 过去）<input id="n-webhook" type="password" autocomplete="off" placeholder="https://…，留空表示不改"></label>
+        <label class="span2">Bark Key（可选，iPhone 推送，在 Bark App 里看）<input id="n-bark" type="password" autocomplete="off" placeholder="留空表示不改"></label>
+        <label class="span2">Server酱 SendKey（可选，微信推送，在 sct.ftqq.com 看）<input id="n-sct" type="password" autocomplete="off" placeholder="SCT…，留空表示不改"></label>
       </div>
+      <p class="muted" id="notify-channels"></p>
       <div class="modal-acts" style="justify-content:flex-start">
         <button id="btn-notify-save" class="btn primary">保存设置</button>
         <button id="btn-notify-resolve" class="btn ghost">自动获取 Chat ID</button>
@@ -411,6 +419,7 @@
       <div id="chips" class="chips"></div>
       <div id="tag-row" class="chips" style="margin-top:6px"></div>
       <div class="toolbar">
+        <span class="global-wrap live-only"><input id="global-search" placeholder="🔍 全局搜：服务 / 账号 / 记事…" autocomplete="off"><div id="global-results" class="global-results hidden"></div></span>
         <input id="search" placeholder="🔍 搜名称 / 账号 / 网址 / 备注…">
         <span id="stats" class="muted"></span>
         <button id="btn-bulk" class="btn ghost small live-only">☑️ 批量</button>
@@ -445,6 +454,14 @@
     <section class="panel live-only" id="sec-health">
       <div class="panel-head"><h2>💚 最需要注意的服务</h2><span class="muted">健康分最低的 5 个（在线率 + 到期远近 + 签到 + 死链）</span></div>
       <div id="health-list"></div>
+    </section>
+    <section class="panel live-only" id="sec-uptime">
+      <div class="panel-head"><h2>📊 在线率趋势</h2><span class="muted">近 30 天 · 每天的探活成功率（没检测的那天不画）</span></div>
+      <div class="uptime-row">
+        <select id="uptime-svc"></select>
+        <span id="uptime-summary" class="muted"></span>
+      </div>
+      <canvas id="uptime-chart" class="trend"></canvas>
     </section>
 
     <footer class="foot">
@@ -531,6 +548,11 @@
       </div>
       </div></div>
       <label class="span2">备注第一行会显示成卡片上的加粗介绍<textarea id="f-notes" rows="2"></textarea></label>
+      <div class="span2" id="custom-fields-box">
+        <label style="display:block;margin-bottom:6px">自定义字段（可选，最多 10 个，卡片上会显示）</label>
+        <div id="custom-fields-editor"></div>
+        <button id="btn-add-custom-field" class="btn small ghost" type="button">＋ 添加字段</button>
+      </div>
       <label class="span2"><input id="f-fav" type="checkbox" style="width:auto"> ★ 收藏这个网站（会显示在首页“我的收藏”里）</label>
       <label class="span2"><input id="f-abnormal" type="checkbox" style="width:auto"> ⚠️ 标记异常（这个网站暂时有问题、签到不了，会标红显示）</label>
     </div>
@@ -589,6 +611,6 @@
 </div>
 
 <div id="toast"></div>
-<script src="/app.js?v=20261107-61"></script>
+<script src="/app.js?v=20261107-62"></script>
 </body>
 </html>

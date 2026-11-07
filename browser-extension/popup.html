@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  body { width: 300px; margin: 0; padding: 14px; font: 13px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; color: #222; }
+  h1 { font-size: 15px; margin: 0 0 10px; }
+  label { display: block; margin: 8px 0 4px; color: #555; }
+  input { width: 100%; box-sizing: border-box; padding: 7px 9px; border: 1px solid #ccc; border-radius: 8px; font: inherit; }
+  button { width: 100%; padding: 9px; margin-top: 10px; border: 0; border-radius: 8px; background: #7c3aed; color: #fff; font: inherit; cursor: pointer; }
+  button.ghost { background: #f0f0f0; color: #333; }
+  button:disabled { opacity: .5; cursor: default; }
+  #msg { margin-top: 10px; color: #666; word-break: break-all; }
+  #msg.ok { color: #15803d; }
+  #msg.bad { color: #b91c1c; }
+  .hint { font-size: 12px; color: #888; margin-top: 10px; }
+</style>
+</head>
+<body>
+  <h1>🗂️ HubMate 助手</h1>
+  <label>服务台地址（比如 https://web.jasonsun.us）</label>
+  <input id="hub-url" placeholder="https://你的服务台地址" autocomplete="off">
+  <label>API 令牌（服务台侧栏“🔑 API 令牌”里生成，只用来按域名取账号）</label>
+  <input id="api-token" type="password" placeholder="留空表示不改" autocomplete="off">
+  <button id="btn-save">保存设置</button>
+  <button id="btn-add">➕ 把当前网页存为服务</button>
+  <button id="btn-open" class="ghost">打开服务台</button>
+  <div id="msg"></div>
+  <div class="hint">存为服务用的是浏览器里服务台的登录状态（请先在浏览器里登录服务台）；登录页的自动填充用 API 令牌按域名取账号。地址和令牌只存在本浏览器里，不上传任何地方。</div>
+  <script src="popup.js"></script>
+</body>
+</html>

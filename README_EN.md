@@ -88,6 +88,16 @@ Pure Node.js with **zero dependencies** (no `npm install`), data lives in a sing
 - Every server shares one sync token (use it only between your own servers — it can read and write the whole dataset, keep it secret) and the other servers' addresses; on boot and every 5 minutes each server compares recency and content hash with its peers and pulls or pushes the newer data
 - The current data is auto-backed up before adopting a peer's data (keeps the last 5); note: do not write to two servers in the same second — normally write on one server and treat the other as a hot standby
 
+### What's new (v62)
+- **Bookmark import**: import services in one go from a Chrome / Edge / Safari bookmarks HTML export; URLs that already exist are skipped
+- **Accounts CSV import**: match existing services by name and append accounts in bulk (same columns as the accounts export, so an export can be re-imported as-is); missing services and duplicate accounts are skipped and reported
+- **Multi-channel notifications**: besides Telegram, reminders can also go to a Webhook (POST JSON), Bark (iPhone push), and ServerChan (WeChat push); the test button reports each channel's result
+- **Uptime trend**: a new panel in the data center — pick a service and see a 30-day chart of daily probe success rates
+- **Global search**: one search box at the top searches services, accounts, and notes together, grouped by type; click a result to jump to it
+- **Custom fields**: up to 10 custom key–value pairs per service (e.g. invite code, support email), added/removed in the edit dialog and shown on the card
+- **Browser extension**: for desktop Chrome / Edge (in `browser-extension/`, an add-on in the repo): save the current page as a service in one click, and autofill accounts by domain on login pages; see `browser-extension/README.md` for how to load it
+- **Fix**: restoring a backup no longer drops multi-account data or the "abnormal" flag (restore used to keep only the default account)
+
 ### Backup & security
 - **Backup / restore**: one-click backup download (login password hash, Telegram token, API token, TOTP secret, sync token, and auto-sign-in headers are stripped automatically); restoring auto-saves the current data first (keeps the last 5)
 - **Export ledger**: generates a `服务台账.md` (service ledger) for easy reading

@@ -400,7 +400,7 @@ function renderAll() {
 
   renderBanner();
   if (!live()) renderLanding();
-  else { renderFav(); renderExpiring(); renderPwReuse(); renderYearReview(); refreshApiTokenStatus(); refreshTotpStatus(); refreshGithubStatus(); refreshSyncStatus(); }
+  else { renderFav(); renderExpiring(); renderPwReuse(); renderYearReview(); renderUptime(); refreshApiTokenStatus(); refreshTotpStatus(); refreshGithubStatus(); refreshSyncStatus(); }
   const sb = $('#sec-banner');
   if (live() && meta.passwordIsDefault) {
     sb.innerHTML = '🔒 当前还是初始默认密码，部署到服务器前务必点右上角「改密码」换掉！';
@@ -570,6 +570,9 @@ function cardHTML(s, idx) {
   }
   const bold = cardBold(s);
   const noteLines = (s.notes || '').split(/\r?\n/).slice(1).filter(Boolean);
+  /* v62：自定义字段只在登录后显示（公开页不露） */
+  const cfLine = live() && (s.customFields || []).length
+    ? `<div class="c-note">${(s.customFields || []).map((f) => `${esc(f.k)}：${esc(f.v)}`).join(' · ')}</div>` : '';
   const health = healthScore(s);
   const healthBadge = health !== null ? `<span class="badge ${healthClass(health)}" title="健康分：在线率 + 到期远近 + 签到 + 死链">💚 ${health}</span>` : '';
   const tagChips = (s.tags || []).map((t) => `<button class="tag-chip" data-tag="${esc(t)}" title="只看带“${esc(t)}”标签的服务">${esc(t)}</button>`).join('');
@@ -619,6 +622,7 @@ function cardHTML(s, idx) {
     <div class="c-div"></div>
     <div class="c-note">${metaLine}</div>
     ${noteLines.map((l) => `<div class="c-note">${esc(l)}</div>`).join('')}
+    ${cfLine}
     ${actions}
   </div>`;
 }
@@ -881,6 +885,12 @@ async function loadNotify() {
     $('#n-pushhour').value = (n.pushHour === undefined ? 9 : n.pushHour);
     $('#n-repeat').value = (n.repeatHours === undefined ? 0 : n.repeatHours);
     $('#notify-status').textContent = n.configured ? '已配置' : '未配置';
+    /* v62：其他三个渠道只显示配没配，原值不回显（和 Token 一样） */
+    const ch = [];
+    if (n.webhookConfigured) ch.push('Webhook 已配');
+    if (n.barkConfigured) ch.push('Bark 已配');
+    if (n.serverChanConfigured) ch.push('Server酱 已配');
+    $('#notify-channels').textContent = ch.length ? '其他渠道：' + ch.join(' · ') : '其他渠道：未配（Webhook / Bark / Server酱 可选）';
   } catch { /* 未登录时不打扰 */ }
 }
 /* 反馈一眼可见：成功绿色、失败红色，不再是一行不起眼的灰字 */
@@ -894,8 +904,11 @@ $('#btn-notify-save').addEventListener('click', async () => {
   if (b.disabled) return;
   b.disabled = true;
   try {
-    await api('/api/notify', { method: 'POST', body: JSON.stringify({ token: $('#n-token').value, chatId: $('#n-chat').value, expiring: $('#n-expiring').checked, checkin: $('#n-checkin').checked, pushHour: $('#n-pushhour').value, repeatHours: $('#n-repeat').value }) });
+    await api('/api/notify', { method: 'POST', body: JSON.stringify({ token: $('#n-token').value, chatId: $('#n-chat').value, expiring: $('#n-expiring').checked, checkin: $('#n-checkin').checked, pushHour: $('#n-pushhour').value, repeatHours: $('#n-repeat').value, webhookUrl: $('#n-webhook').value, barkKey: $('#n-bark').value, serverChanKey: $('#n-sct').value }) });
     $('#n-token').value = '';
+    $('#n-webhook').value = '';
+    $('#n-bark').value = '';
+    $('#n-sct').value = '';
     notifyMsg('已保存。', true);
     loadNotify();
   } catch (e) { notifyMsg(e.message, false); }
@@ -921,8 +934,11 @@ $('#btn-notify-test').addEventListener('click', async () => {
   const oldText = b.textContent;
   b.textContent = '发送中…';
   try {
-    await api('/api/notify/test', { method: 'POST' });
-    notifyMsg('测试消息已发送，请去 Telegram 查看。', true);
+    const r = await api('/api/notify/test', { method: 'POST' });
+    /* v62：测试结果按渠道逐个报（ok / 未配置 / 失败原因） */
+    const names = { telegram: 'Telegram', webhook: 'Webhook', bark: 'Bark', serverchan: 'Server酱' };
+    const parts = Object.entries(r.channels || {}).map(([k, v]) => `${names[k] || k}：${v === 'ok' ? '✅ 已发送' : v === 'skip' ? '未配置' : '❌ ' + v}`);
+    notifyMsg(parts.length ? '测试结果：' + parts.join(' · ') : '测试消息已发送，请去 Telegram 查看。', true);
   } catch (e) { notifyMsg(e.message, false); }
   finally { b.disabled = false; b.textContent = oldText; }
 });
@@ -1107,6 +1123,9 @@ function openModal(svc) {
   $('#f-notes').value = svc?.notes || '';
   $('#f-fav').checked = isFav(svc);
   $('#f-abnormal').checked = !!svc?.abnormal;
+  /* v62：自定义字段——打开弹窗时从服务里抄一份草稿 */
+  customFieldsDraft = (svc?.customFields || []).map((f) => ({ k: f.k || '', v: f.v || '' }));
+  renderCustomFieldsEditor();
   /* v60：自动签到配置——请求头一行一个“名字: 值”，打开时拼回文本框 */
   const as = svc?.autoSignin || {};
   $('#f-autosignin-enabled').checked = !!as.enabled;
@@ -1125,6 +1144,39 @@ function closeModal() {
   $('#overlay').classList.add('hidden');
   editingId = null;
 }
+
+/* v62：自定义字段编辑器——弹窗里加行/删行；输入框里的值只在保存时一次性收集，
+   删行/加行前先把当前输入收进草稿，免得重渲染把刚打的字丢了 */
+let customFieldsDraft = [];
+function renderCustomFieldsEditor() {
+  const box = $('#custom-fields-editor');
+  if (!box) return;
+  box.innerHTML = customFieldsDraft.map((f, i) => `<div class="cf-row"><input data-cf-k="${i}" value="${esc(f.k)}" placeholder="字段名，比如 邀请码" maxlength="20"><input data-cf-v="${i}" value="${esc(f.v)}" placeholder="值" maxlength="200"><button class="btn small ghost" type="button" data-cf-del="${i}" title="删除这个字段">✕</button></div>`).join('');
+}
+function collectCustomFields() {
+  const out = [];
+  document.querySelectorAll('#custom-fields-editor .cf-row').forEach((row) => {
+    const k = row.querySelector('[data-cf-k]')?.value.trim() || '';
+    const v = row.querySelector('[data-cf-v]')?.value.trim() || '';
+    if (k) out.push({ k: k.slice(0, 20), v: v.slice(0, 200) });
+  });
+  return out.slice(0, 10);
+}
+$('#custom-fields-editor')?.addEventListener('click', (e) => {
+  const del = e.target.closest('[data-cf-del]');
+  if (!del) return;
+  customFieldsDraft = collectCustomFields();
+  customFieldsDraft.splice(Number(del.dataset.cfDel), 1);
+  renderCustomFieldsEditor();
+});
+$('#btn-add-custom-field')?.addEventListener('click', () => {
+  customFieldsDraft = collectCustomFields();
+  if (customFieldsDraft.length >= 10) { toast('自定义字段最多 10 个', 'bad'); return; }
+  customFieldsDraft.push({ k: '', v: '' });
+  renderCustomFieldsEditor();
+  const rows = document.querySelectorAll('#custom-fields-editor .cf-row input');
+  if (rows.length) rows[rows.length - 2]?.focus();
+});
 
 /* v51：改开始时间或续期周期时自动填到期日；手动改过到期日则不覆盖 */
 $('#f-registered').addEventListener('change', autoFillExpires);
@@ -1454,6 +1506,7 @@ $('#modal-save').addEventListener('click', async () => {
     notes: $('#f-notes').value.trim(),
     favorite: $('#f-fav').checked,
     abnormal: $('#f-abnormal').checked,
+    customFields: collectCustomFields(),
     /* v60：自动签到配置——请求头一行一个“名字: 值”，解析成对象；没填网址就不发这个字段 */
     autoSignin: (() => {
       const url = $('#f-autosignin-url').value.trim();
@@ -1713,6 +1766,93 @@ $('#csv-file').addEventListener('change', async (e) => {
   try {
     const r = await api('/api/services/import', { method: 'POST', body: JSON.stringify({ services: list }) });
     toast(`已导入 ${r.imported} 个服务${r.skipped ? `，跳过 ${r.skipped} 个` : ''}`);
+    await loadAll();
+  } catch (err) { handleAuthErr(err); }
+});
+
+/* ---------- v62：书签导入 / 账号导入 ---------- */
+/* 书签导入——Chrome/Edge/Safari 导出的书签 HTML，<A HREF> 就是一条书签；文件内同网址去重 */
+function parseBookmarks(text) {
+  const doc = new DOMParser().parseFromString(text, 'text/html');
+  const seen = new Set();
+  const list = [];
+  doc.querySelectorAll('a[href]').forEach((a) => {
+    const url = (a.getAttribute('href') || '').trim();
+    const name = (a.textContent || '').trim();
+    if (!url || !/^https?:\/\//i.test(url) || !name) return;
+    const key = url.toLowerCase().replace(/\/+$/, '');
+    if (seen.has(key)) return;
+    seen.add(key);
+    list.push({ name: name.slice(0, 100), url: url.slice(0, 500), category: 'relay', checkinFrequency: 'none', checkinEveryDays: 1, renewDays: 365 });
+  });
+  return list;
+}
+$('#btn-bookmark-import').addEventListener('click', () => $('#bookmark-file').click());
+$('#bookmark-file').addEventListener('change', async (e) => {
+  const f = e.target.files[0];
+  e.target.value = '';
+  if (!f) return;
+  let text;
+  try { text = await f.text(); } catch { toast('读不到这个文件', 'bad'); return; }
+  const list = parseBookmarks(text);
+  if (!list.length) { toast('这个书签文件里没有能导入的链接', 'bad'); return; }
+  const preview = list.slice(0, 5).map((s) => s.name).join('、');
+  if (!confirm(`书签里共 ${list.length} 个链接。\n前几个：${preview}${list.length > 5 ? '…' : ''}\n确定导入吗？只新增，同网址已存在的会跳过。`)) return;
+  try {
+    const r = await api('/api/services/import-bookmarks', { method: 'POST', body: JSON.stringify({ services: list }) });
+    toast(`已导入 ${r.imported} 个服务${r.dupes ? `，跳过 ${r.dupes} 个已存在的` : ''}${r.skipped ? `，跳过 ${r.skipped} 个无效的` : ''}`);
+    await loadAll();
+  } catch (err) { handleAuthErr(err); }
+});
+/* 账号 CSV 导入——列：服务、账号名称、账号、密码、网址、备注；和 v60 的账号导出是同一套表头，可原样导回 */
+const ACC_CSV_HEADERS = {
+  service: ['service', '服务', '服务名'],
+  label: ['label', '账号名称', '名称'],
+  username: ['username', '账号', '用户名'],
+  password: ['password', '密码', '密钥'],
+  url: ['url', '网址', '地址'],
+  notes: ['notes', '备注', 'note']
+};
+function mapAccountCSVRows(rows) {
+  const header = rows[0].map(normHeader);
+  const idx = {};
+  for (const [field, names] of Object.entries(ACC_CSV_HEADERS)) {
+    for (const n of names) {
+      const i = header.indexOf(normHeader(n));
+      if (i >= 0) { idx[field] = i; break; }
+    }
+  }
+  const list = [];
+  let skipped = 0;
+  for (let r = 1; r < rows.length; r++) {
+    const row = rows[r];
+    const get = (f) => (idx[f] === undefined ? '' : String(row[idx[f]] ?? '').trim());
+    const service = get('service');
+    const username = get('username');
+    if (!service || !username) { skipped++; continue; }
+    list.push({ service: service.slice(0, 100), label: get('label').slice(0, 30), username: username.slice(0, 200), password: get('password').slice(0, 500), url: get('url').slice(0, 500), notes: get('notes').slice(0, 200) });
+  }
+  return { list, skipped };
+}
+$('#btn-acc-import').addEventListener('click', () => $('#acc-csv-file').click());
+$('#acc-csv-file').addEventListener('change', async (e) => {
+  const f = e.target.files[0];
+  e.target.value = '';
+  if (!f) return;
+  let text;
+  try { text = await f.text(); } catch { toast('读不到这个文件', 'bad'); return; }
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+  const rows = parseCSV(text);
+  if (!rows.length) { toast('这个 CSV 是空的', 'bad'); return; }
+  const { list, skipped } = mapAccountCSVRows(rows);
+  if (!list.length) { toast('这个 CSV 里没有能导入的账号（服务名和账号必填）', 'bad'); return; }
+  const preview = list.slice(0, 5).map((a) => `${a.service} / ${a.username}`).join('、');
+  if (!confirm(`CSV 里共 ${rows.length - 1} 行，其中 ${list.length} 个有效${skipped ? `、${skipped} 个跳过` : ''}。\n前几个：${preview}${list.length > 5 ? '…' : ''}\n确定导入吗？按服务名匹配已有服务，找不到的跳过，同账号已存在的跳过。`)) return;
+  try {
+    const r = await api('/api/services/import-accounts', { method: 'POST', body: JSON.stringify({ accounts: list }) });
+    let msg = `已导入 ${r.imported} 个账号${r.dupes ? `，跳过 ${r.dupes} 个已存在的` : ''}`;
+    if (r.missing && r.missing.length) msg += `；找不到这些服务：${r.missing.slice(0, 5).join('、')}${r.missing.length > 5 ? '…' : ''}`;
+    toast(msg);
     await loadAll();
   } catch (err) { handleAuthErr(err); }
 });
@@ -2281,6 +2421,73 @@ function typewrite(el, text) {
 }
 
 /* 签到趋势图（近 14 天柱状图，canvas 手绘，生长动画，随主题变色） */
+/* v62：在线率趋势——取某服务的 linkHistory，按天聚合近 30 天的探活成功率，画柱状图（和签到趋势图同款手绘风格） */
+let uptimeSvcId = null;
+function uptimeDaily(s, days = 30) {
+  const hist = (Array.isArray(s.linkHistory) ? s.linkHistory : []).filter((h) => h && typeof h.t === 'number' && typeof h.ok === 'boolean');
+  const out = [];
+  const now = new Date();
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const dayStart = d.getTime(), dayEnd = dayStart + 86400e3;
+    const recs = hist.filter((h) => h.t >= dayStart && h.t < dayEnd);
+    out.push({ key, rate: recs.length ? Math.round(recs.filter((h) => h.ok).length / recs.length * 100) : null, n: recs.length });
+  }
+  return out;
+}
+function renderUptime() {
+  const box = $('#sec-uptime');
+  if (!box || !live()) return;
+  const sel = $('#uptime-svc');
+  const withData = services.filter((s) => (s.linkHistory || []).length);
+  const cv = $('#uptime-chart');
+  if (!withData.length) {
+    sel.innerHTML = '';
+    $('#uptime-summary').textContent = '还没有探活记录（等死链检测跑一轮就有数据了）';
+    if (cv) cv.getContext('2d')?.clearRect(0, 0, cv.width, cv.height);
+    return;
+  }
+  if (!uptimeSvcId || !withData.some((s) => s.id === uptimeSvcId)) uptimeSvcId = withData[0].id;
+  sel.innerHTML = withData.map((s) => `<option value="${s.id}" ${s.id === uptimeSvcId ? 'selected' : ''}>${esc(s.name)}</option>`).join('');
+  const svc = withData.find((s) => s.id === uptimeSvcId);
+  const days = uptimeDaily(svc, 30);
+  const probed = days.filter((d) => d.rate !== null);
+  const avg = probed.length ? Math.round(probed.reduce((n, d) => n + d.rate, 0) / probed.length) : null;
+  $('#uptime-summary').textContent = avg !== null ? `近 30 天平均在线率 ${avg}%（${probed.length} 天有检测）` : '近 30 天没有检测记录';
+  if (!cv) return;
+  const W = cv.clientWidth, H = cv.clientHeight;
+  if (!W || !H) return;
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = W * dpr; cv.height = H * dpr;
+  const ctx = cv.getContext('2d');
+  ctx.scale(dpr, dpr);
+  const cs = getComputedStyle(document.body);
+  const g2 = cs.getPropertyValue('--g2').trim() || '#d946ef';
+  const g3 = cs.getPropertyValue('--accent-2').trim() || '#22d3ee';
+  const bw = W / 30, barW = Math.min(16, bw * .6), base = H - 16;
+  days.forEach((d, i) => {
+    if (d.rate === null) return;
+    const h = Math.max(3, (d.rate / 100) * (H - 42));
+    const x = i * bw + (bw - barW) / 2, y = base - h;
+    const grad = ctx.createLinearGradient(0, y, 0, base);
+    grad.addColorStop(0, d.rate >= 90 ? g3 : g2);
+    grad.addColorStop(1, g3);
+    ctx.globalAlpha = .95;
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(x, y, barW, h, 4); else ctx.rect(x, y, barW, h);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    if (i % 5 === 4 || i === 29) {
+      ctx.fillStyle = 'rgba(150,140,190,.65)';
+      ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText(`${+d.key.slice(5, 7)}/${+d.key.slice(8)}`, x + barW / 2, H - 3);
+    }
+  });
+}
+$('#uptime-svc')?.addEventListener('change', (e) => { uptimeSvcId = e.target.value; renderUptime(); });
+
 function drawTrend() {
   const cv = document.getElementById('trend-chart');
   if (!cv || !services.length) return;
@@ -2338,7 +2545,7 @@ function drawTrend() {
 let trendTimer = null;
 addEventListener('resize', () => {
   clearTimeout(trendTimer);
-  trendTimer = setTimeout(drawTrend, 150);
+  trendTimer = setTimeout(() => { drawTrend(); renderUptime(); }, 150);
 });
 
 /* 星空粒子（canvas，主题三色 + 邻近连线） */
@@ -2777,6 +2984,74 @@ let landingSearchTimer = null;
 $('#landing-search')?.addEventListener('input', () => {
   clearTimeout(landingSearchTimer);
   landingSearchTimer = setTimeout(renderLanding, 150);
+});
+
+/* ---------- v62：统一全局搜索——一次搜服务（名称/账号/网址/备注/标签）、账号（名称/账号）、
+   记事（标题/内容），结果分组显示，点结果跳过去；原来的两个搜索框不动，各搜各的 */
+let globalSearchTimer = null;
+function hideGlobalResults() { $('#global-results')?.classList.add('hidden'); }
+function renderGlobalSearch() {
+  const box = $('#global-results');
+  const input = $('#global-search');
+  if (!box || !input) return;
+  const kw = input.value.trim().toLowerCase();
+  if (!kw || !live()) { hideGlobalResults(); return; }
+  const svcHits = services.filter((s) => `${s.name} ${s.account || ''} ${s.url} ${s.notes} ${(s.tags || []).join(' ')}`.toLowerCase().includes(kw)).slice(0, 5);
+  const accHits = [];
+  for (const s of services) {
+    for (const a of accountList(s)) {
+      if (`${a.label || ''} ${a.username || ''}`.toLowerCase().includes(kw)) accHits.push({ svc: s, acc: a });
+      if (accHits.length >= 5) break;
+    }
+    if (accHits.length >= 5) break;
+  }
+  const noteHits = notes.filter((n) => `${n.title || ''} ${n.content || ''}`.toLowerCase().includes(kw)).slice(0, 5);
+  if (!svcHits.length && !accHits.length && !noteHits.length) {
+    box.innerHTML = '<div class="gr-empty">没找到相关服务、账号或记事</div>';
+    box.classList.remove('hidden');
+    return;
+  }
+  let html = '';
+  if (svcHits.length) html += `<div class="gr-group">🗂️ 服务</div>` + svcHits.map((s) => `<button class="gr-item" data-gr="svc" data-id="${s.id}">${esc(s.name)}<small>${esc(s.url || s.notes || '')}</small></button>`).join('');
+  if (accHits.length) html += `<div class="gr-group">👤 账号</div>` + accHits.map(({ svc, acc }) => `<button class="gr-item" data-gr="acc" data-id="${svc.id}">${esc(acc.username || acc.label || '')}<small>${esc(svc.name)} · ${esc(acc.label || '')}</small></button>`).join('');
+  if (noteHits.length) html += `<div class="gr-group">📝 记事</div>` + noteHits.map((n) => `<button class="gr-item" data-gr="note" data-id="${n.id}">${esc(n.title || '（无标题）')}<small>${esc(stripMarkdown(n.content || '').slice(0, 60))}</small></button>`).join('');
+  box.innerHTML = html;
+  box.classList.remove('hidden');
+}
+$('#global-search')?.addEventListener('input', () => {
+  clearTimeout(globalSearchTimer);
+  globalSearchTimer = setTimeout(renderGlobalSearch, 150);
+});
+$('#global-search')?.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.target.value = ''; hideGlobalResults(); } });
+$('#global-results')?.addEventListener('click', (e) => {
+  const item = e.target.closest('[data-gr]');
+  if (!item) return;
+  const kind = item.dataset.gr, id = item.dataset.id;
+  hideGlobalResults();
+  $('#global-search').value = '';
+  if (kind === 'svc') {
+    filter = 'all'; tagFilter = null; q = '';
+    const searchEl = $('#search'); if (searchEl) searchEl.value = '';
+    renderChips(); renderGrid();
+    const el = document.querySelector(`.card[data-id="${id}"]`);
+    if (el) {
+      el.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'center' });
+      el.classList.add('card-flash');
+      setTimeout(() => el.classList.remove('card-flash'), 1500);
+    }
+  } else if (kind === 'acc') {
+    openAccManager(id);
+  } else if (kind === 'note') {
+    noteKw = '';
+    const ns = $('#notes-search'); if (ns) ns.value = '';
+    noteExpandedId = id;
+    renderNotes();
+    document.getElementById('sec-notes')?.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth' });
+    setTimeout(() => document.querySelector(`.note-item[data-id="${id}"]`)?.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'center' }), 100);
+  }
+});
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.global-wrap')) hideGlobalResults();
 });
 
 /* 快捷键：/ 聚焦搜索 · N 新建服务 · C 一键全签 */

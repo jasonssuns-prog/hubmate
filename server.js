@@ -540,6 +540,22 @@ function normalizeAccounts(svc) {
   svc.secret = def ? def.password : '';
   return svc;
 }
+/* v62：自定义字段——每服务最多 10 个键值对，字段名 ≤20 字、值 ≤200 字，同名字段只留第一个 */
+function sanitizeCustomFields(v) {
+  if (!Array.isArray(v)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const f of v) {
+    if (!f || typeof f !== 'object') continue;
+    const k = String(f.k || '').trim().slice(0, 20);
+    const val = String(f.v ?? '').trim().slice(0, 200);
+    if (!k || seen.has(k)) continue;
+    seen.add(k);
+    out.push({ k, v: val });
+    if (out.length >= 10) break;
+  }
+  return out;
+}
 function pickFields(b, existing, catIds) {
   const out = {};
   if (typeof b.name === 'string') out.name = b.name.trim().slice(0, 100);
@@ -549,6 +565,8 @@ function pickFields(b, existing, catIds) {
   if (b.renewDays !== undefined) out.renewDays = clampInt(b.renewDays, 1, 3650, 365);
   if (b.favorite !== undefined) out.favorite = !!b.favorite;
   if (b.abnormal !== undefined) out.abnormal = !!b.abnormal;
+  /* v62：自定义字段——编辑页里加行/删行；只接受干净的键值对数组 */
+  if (b.customFields !== undefined) out.customFields = sanitizeCustomFields(b.customFields);
   /* v60：多标签——逗号分隔也行，数组也行；最多 10 个，每个最多 20 字，去重去空 */
   if (b.tags !== undefined) {
     const raw = Array.isArray(b.tags) ? b.tags : String(b.tags || '').split(/[,，、\s]+/);
@@ -638,6 +656,53 @@ async function tgSend(token, chatId, text, markup) {
 /* Telegram HTML 模式下服务名必须转义，否则名字里的 <>& 会破坏格式 */
 function escHtml(s) {
   return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+/* v62：多渠道通知——Telegram 之外的三个渠道。HTML 文案要先剥标签再发纯文本渠道 */
+function stripHtmlTags(s) {
+  return String(s ?? '').replace(/<[^>]*>/g, '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+}
+async function sendWebhook(url, title, text) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title, text, time: cstDateTime(), source: 'hubmate' }),
+    signal: AbortSignal.timeout(10000)
+  });
+  if (!res.ok) throw new Error(`Webhook 返回 ${res.status}`);
+}
+async function sendBark(key, title, body) {
+  const url = `https://api.day.app/${encodeURIComponent(key)}/${encodeURIComponent(title)}/${encodeURIComponent(body)}`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+  if (!res.ok) throw new Error(`Bark 返回 ${res.status}`);
+}
+async function sendServerChan(key, title, desp) {
+  const res = await fetch(`https://sctapi.ftqq.com/${encodeURIComponent(key)}.send`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `title=${encodeURIComponent(title)}&desp=${encodeURIComponent(desp)}`,
+    signal: AbortSignal.timeout(10000)
+  });
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok || (j.code !== undefined && j.code !== 0)) throw new Error(j.message || `Server酱返回 ${res.status}`);
+}
+/* v62：一次提醒发到所有配好的渠道；返回每个渠道 ok/skip/error，至少一个成功算整体成功 */
+async function sendMultiChannel(n, title, htmlText, tgMarkup) {
+  const plain = stripHtmlTags(htmlText);
+  const results = {};
+  const run = async (name, fn) => {
+    try { await fn(); results[name] = 'ok'; }
+    catch (e) { results[name] = 'error: ' + (e.message || '发送失败'); console.error(`[!] ${name} 推送失败:`, e.message); }
+  };
+  if (n.token && n.chatId) await run('telegram', () => tgSend(n.token, n.chatId, htmlText, tgMarkup));
+  else results.telegram = 'skip';
+  if (n.webhookUrl) await run('webhook', () => sendWebhook(n.webhookUrl, title, plain));
+  else results.webhook = 'skip';
+  if (n.barkKey) await run('bark', () => sendBark(n.barkKey, title, plain));
+  else results.bark = 'skip';
+  if (n.serverChanKey) await run('serverchan', () => sendServerChan(n.serverChanKey, title, plain));
+  else results.serverchan = 'skip';
+  const ok = Object.values(results).some((v) => v === 'ok');
+  return { ok, results };
 }
 /* 日期加一年：2 月 29 日 → 次年 2 月 28 日，不会溢出到 3 月 */
 function addYear(dateStr) {
@@ -817,23 +882,28 @@ async function runNotifyChecks() {
   try {
     const data = loadData();
     const n = notifyCfg(data);
-    if (!n.token || !n.chatId) return;
+    /* v62：任一渠道配好了就跑，不再只认 Telegram */
+    if (!(n.token && n.chatId) && !n.webhookUrl && !n.barkKey && !n.serverChanKey) return;
     /* 记下本轮开始时的日期字段：写回时只合并本轮改过的，盘上更新的以盘上为准 */
     const prevNotify = { lastExpiring: n.lastExpiring, lastCheckin: n.lastCheckin, lastCheckinRepeatAt: n.lastCheckinRepeatAt };
     const pushHour = (n.pushHour === undefined ? 9 : n.pushHour);
     if (cstHour() < pushHour) return;
     const t = todayStr();
     let dirty = false;
-    const tryPush = async (fn) => {
-      try { await fn(); return true; }
-      catch (e) { console.error('[!] TG 推送失败:', e.message); return false; }
+    /* v62：多渠道发一次；至少一个渠道成功才算发出去（失败不记日期，下小时重试） */
+    const tryPush = async (title, htmlText, tgMarkup) => {
+      try {
+        const r = await sendMultiChannel(n, title, htmlText, tgMarkup);
+        if (!r.ok) console.error('[!] 多渠道推送全部失败');
+        return r.ok;
+      } catch (e) { console.error('[!] 多渠道推送异常:', e.message); return false; }
     };
     if (n.expiring !== false && n.lastExpiring !== t) {
       const items = expiringList(data);
       let ok = true;
       if (items.length) {
-        ok = await tryPush(() => tgSend(n.token, n.chatId,
-          `⏰ <b>服务台临期提醒</b> · ${t}\n共 ${items.length} 个服务临期：\n\n${expiringLines(items).join('\n')}`));
+        ok = await tryPush(`服务台临期提醒 · ${t}`,
+          `⏰ <b>服务台临期提醒</b> · ${t}\n共 ${items.length} 个服务临期：\n\n${expiringLines(items).join('\n')}`);
       }
       if (ok) { n.lastExpiring = t; dirty = true; }
     }
@@ -841,8 +911,8 @@ async function runNotifyChecks() {
       const todo = unsignedDaily(data, t);
       let ok = true;
       if (todo.length) {
-        ok = await tryPush(() => tgSend(n.token, n.chatId,
-          `⚡ <b>服务台签到提醒</b> · ${t}\n今日还有 ${todo.length} 个站未签到：\n\n${checkinLines(todo).join('\n')}\n\n👉 点下面按钮直接签完，别断了连签。`, CHECKIN_KB));
+        ok = await tryPush(`服务台签到提醒 · ${t}`,
+          `⚡ <b>服务台签到提醒</b> · ${t}\n今日还有 ${todo.length} 个站未签到：\n\n${checkinLines(todo).join('\n')}\n\n👉 点下面按钮直接签完，别断了连签。`, CHECKIN_KB);
       }
       if (ok) { n.lastCheckin = t; n.lastCheckinRepeatAt = Date.now(); dirty = true; }
     }
@@ -853,8 +923,8 @@ async function runNotifyChecks() {
       const h = cstHour();
       const last = n.lastCheckinRepeatAt || 0;
       if (todo.length && h >= pushHour && h < 23 && Date.now() - last >= n.repeatHours * 3600e3) {
-        const okR = await tryPush(() => tgSend(n.token, n.chatId,
-          `⚡ <b>服务台签到提醒（复查）</b> · ${t}\n今日还有 ${todo.length} 个站未签到：\n\n${checkinLines(todo).join('\n')}\n\n👉 点下面按钮直接签完，别断了连签。`, CHECKIN_KB));
+        const okR = await tryPush(`服务台签到提醒（复查）· ${t}`,
+          `⚡ <b>服务台签到提醒（复查）</b> · ${t}\n今日还有 ${todo.length} 个站未签到：\n\n${checkinLines(todo).join('\n')}\n\n👉 点下面按钮直接签完，别断了连签。`, CHECKIN_KB);
         if (okR) { n.lastCheckinRepeatAt = Date.now(); dirty = true; }
       }
     }
@@ -1098,6 +1168,9 @@ function strippedBackupData(data) {
   });
   out.notify = { ...(data.notify || {}) };
   delete out.notify.token;
+  delete out.notify.webhookUrl;
+  delete out.notify.barkKey;
+  delete out.notify.serverChanKey;
   out.githubBackup = { ...(data.githubBackup || {}) };
   delete out.githubBackup.token;
   return out;
@@ -1369,6 +1442,27 @@ async function handleAPI(req, res, pathname) {
     return send(200, { ok: true, applied: true });
   }
 
+  /* ---------- v62：浏览器扩展按域名取账号——登录会话或 API 令牌都认；
+     只返回和这个域名匹配的服务的账号（精确域名或子域名），别的服务一律不返回 */
+  if (pathname === '/api/accounts/by-domain' && req.method === 'GET') {
+    if (!currentUser(req) && !isApiToken(req)) return send(401, { error: '未登录' });
+    const raw = new URL(req.url, 'http://x').searchParams.get('domain') || '';
+    const dom = raw.trim().toLowerCase().replace(/^www\./, '').replace(/:\d+$/, '');
+    if (!dom || !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(dom)) return send(400, { error: '域名不对' });
+    const data = loadData();
+    const out = [];
+    for (const s of data.services) {
+      let host = '';
+      try { host = new URL(/^https?:\/\//i.test(s.url || '') ? s.url : 'https://' + (s.url || '')).hostname.toLowerCase().replace(/^www\./, ''); } catch { continue; }
+      if (!host || !(host === dom || host.endsWith('.' + dom))) continue;
+      for (const a of serviceAccounts(s)) {
+        out.push({ serviceId: s.id, serviceName: s.name, label: a.label || '', username: a.username || '', password: a.password || '', url: s.url || '' });
+      }
+      if (out.length >= 20) break;
+    }
+    return send(200, { ok: true, domain: dom, accounts: out.slice(0, 20) });
+  }
+
   const auth = currentUser(req);
   /* v59：API 令牌只放行签到接口（没登录也能用令牌签到），别的接口仍要登录 */
   const tokenAllowed = !auth && isApiToken(req) && isTokenAllowedEndpoint(pathname, req.method);
@@ -1534,7 +1628,8 @@ async function handleAPI(req, res, pathname) {
     writeJSON(DATA_FILE, data);
     return send(200, { ok: true });
   }
-  /* Telegram 通知设置：Token 永不返回给前端，留空表示不改 */
+  /* Telegram 通知设置：Token 永不返回给前端，留空表示不改；
+     v62：Webhook 地址、Bark Key、Server酱 Key 也一样，只返回配没配，不返回原值 */
   if (pathname === '/api/notify' && req.method === 'GET') {
     const n = notifyCfg(loadData());
     return send(200, {
@@ -1544,6 +1639,9 @@ async function handleAPI(req, res, pathname) {
       checkin: n.checkin !== false,
       pushHour: (n.pushHour === undefined ? 9 : n.pushHour),
       repeatHours: (n.repeatHours === undefined ? 0 : n.repeatHours),
+      webhookConfigured: !!n.webhookUrl,
+      barkConfigured: !!n.barkKey,
+      serverChanConfigured: !!n.serverChanKey,
       lastExpiring: n.lastExpiring || '',
       lastCheckin: n.lastCheckin || ''
     });
@@ -1554,6 +1652,14 @@ async function handleAPI(req, res, pathname) {
     const n = notifyCfg(data);
     if (typeof body.token === 'string' && body.token.trim()) n.token = body.token.trim().slice(0, 200);
     if (typeof body.chatId === 'string' && body.chatId.trim()) n.chatId = body.chatId.trim().slice(0, 64);
+    /* v62：三个新渠道——和 Token 同口径：填了就保存，留空表示不改 */
+    if (typeof body.webhookUrl === 'string' && body.webhookUrl.trim()) {
+      const u = body.webhookUrl.trim().slice(0, 500);
+      if (!/^https?:\/\//i.test(u)) return send(400, { error: 'Webhook 地址要是 http(s) 开头' });
+      n.webhookUrl = u;
+    }
+    if (typeof body.barkKey === 'string' && body.barkKey.trim()) n.barkKey = body.barkKey.trim().slice(0, 200);
+    if (typeof body.serverChanKey === 'string' && body.serverChanKey.trim()) n.serverChanKey = body.serverChanKey.trim().slice(0, 200);
     if (body.expiring !== undefined) n.expiring = !!body.expiring;
     if (body.checkin !== undefined) n.checkin = !!body.checkin;
     if (body.pushHour !== undefined && body.pushHour !== '') {
@@ -1570,7 +1676,8 @@ async function handleAPI(req, res, pathname) {
   if (pathname === '/api/notify/test' && req.method === 'POST') {
     const data = loadData();
     const n = notifyCfg(data);
-    if (!n.token || !n.chatId) return send(400, { error: '还没设置 Token 或 Chat ID' });
+    const hasAny = (n.token && n.chatId) || n.webhookUrl || n.barkKey || n.serverChanKey;
+    if (!hasAny) return send(400, { error: '还没设置任何通知渠道（Telegram / Webhook / Bark / Server酱）' });
     const t = todayStr();
     const cohort = checkinCohort(data, t);
     const done = cohort.filter((s) => (s.checkins || []).includes(t)).length;
@@ -1582,11 +1689,10 @@ async function handleAPI(req, res, pathname) {
     const ckPreview = todo.length
       ? `⚡ <b>签到预览</b>（${todo.length} 个未签）：\n${checkinLines(todo).join('\n')}`
       : '⚡ <b>签到预览</b>：今日已全部签到';
-    try {
-      await tgSend(n.token, n.chatId,
-        `✅ <b>服务台通知测试成功</b> · ${t}\n今日签到 ${done}/${cohort.length} · 30 天内临期 ${items.length} 个\n\n${expPreview}\n\n${ckPreview}\n\n上面就是每天早上会收到的提醒版式。${todo.length ? '（下面这个按钮是真的，点一下就签完了。）' : ''}`, todo.length ? CHECKIN_KB : undefined);
-      return send(200, { ok: true });
-    } catch (e) { return send(400, { error: `发送失败：${e.message}` }); }
+    const html = `✅ <b>服务台通知测试成功</b> · ${t}\n今日签到 ${done}/${cohort.length} · 30 天内临期 ${items.length} 个\n\n${expPreview}\n\n${ckPreview}\n\n上面就是每天早上会收到的提醒版式。${todo.length ? '（Telegram 下面这个按钮是真的，点一下就签完了。）' : ''}`;
+    const r = await sendMultiChannel(n, `服务台通知测试 · ${t}`, html, todo.length ? CHECKIN_KB : undefined);
+    if (!r.ok) return send(400, { error: '全部渠道都发送失败', channels: r.results });
+    return send(200, { ok: true, channels: r.results });
   }
   /* 手动触发链接检测（登录后可用） */
   if (pathname === '/api/linkcheck' && req.method === 'POST') {
@@ -1720,6 +1826,8 @@ async function handleAPI(req, res, pathname) {
       checkinEveryDays: clampInt(s.checkinEveryDays, 1, 365, 1),
       renewDays: clampInt(s.renewDays, 1, 3650, 365),
       favorite: !!s.favorite,
+      abnormal: !!s.abnormal,
+      accounts: (Array.isArray(s.accounts) ? s.accounts : []).map(sanitizeAccount).filter(Boolean).slice(0, 20),
       checkins: Array.isArray(s.checkins) ? s.checkins.filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)) : [],
       visits: Number(s.visits) || 0,
       sortOrder: Number(s.sortOrder) || 0,
@@ -1727,9 +1835,13 @@ async function handleAPI(req, res, pathname) {
       linkHistory: (Array.isArray(s.linkHistory) ? s.linkHistory : []).filter((h) => h && typeof h.t === 'number' && typeof h.ok === 'boolean').slice(-120),
       renewHistory: (Array.isArray(s.renewHistory) ? s.renewHistory : []).filter((h) => h && /^\d{4}-\d{2}-\d{2}$/.test(h.at || '') && typeof h.from === 'string' && typeof h.to === 'string').slice(-20),
       tags: (Array.isArray(s.tags) ? s.tags : []).map((t) => String(t).trim().slice(0, 20)).filter(Boolean).slice(0, 10),
+      customFields: sanitizeCustomFields(s.customFields),
       autoSignin: sanitizeAutoSignin(s.autoSignin),
       autoSigninLast: (s.autoSigninLast && typeof s.autoSigninLast === 'object') ? { at: String(s.autoSigninLast.at || '').slice(0, 30), ok: !!s.autoSigninLast.ok, status: Number(s.autoSigninLast.status) || 0, note: String(s.autoSigninLast.note || '').slice(0, 200) } : undefined
     }));
+    /* v62：恢复后归一化账号——默认账号的镜像（account/secret）跟恢复回来的 accounts 走，
+       不然旧备份里只有镜像、没有 accounts 数组的服务会丢账号 */
+    data.services.forEach(normalizeAccounts);
     data.categories = cats.map((c) => ({ id: c.id, label: String(c.label).slice(0, 20), icon: cleanIcon(c.icon), cls: c.cls || 't-custom' }));
     if (imp.history && typeof imp.history === 'object') data.history = imp.history;
     if (imp.achievements && typeof imp.achievements === 'object') data.achievements = imp.achievements;
@@ -1737,9 +1849,12 @@ async function handleAPI(req, res, pathname) {
     if (imp.flags && typeof imp.flags === 'object') data.flags = imp.flags;
     if (imp.notify && typeof imp.notify === 'object') {
       const n = notifyCfg(data);
-      const keepToken = n.token;
+      /* v62：Token、Webhook 地址、Bark Key、Server酱 Key 永远沿用当前值，不被备份盖掉 */
+      const keep = { token: n.token, webhookUrl: n.webhookUrl, barkKey: n.barkKey, serverChanKey: n.serverChanKey };
       Object.assign(n, imp.notify);
-      if (keepToken) n.token = keepToken; else delete n.token;
+      for (const k of ['token', 'webhookUrl', 'barkKey', 'serverChanKey']) {
+        if (keep[k]) n[k] = keep[k]; else delete n[k];
+      }
     }
     writeJSON(DATA_FILE, data);
     return send(200, { ok: true, services: data.services.length });
@@ -1806,7 +1921,82 @@ async function handleAPI(req, res, pathname) {
     return send(200, { ok: true, imported, skipped: rows.length - imported });
   }
 
-  /* 卡片拖拽排序持久化 */
+  /* v62：书签导入——和 CSV 导入同一套新增逻辑，但同 URL 已存在就跳过（不重复建） */
+  if (pathname === '/api/services/import-bookmarks' && req.method === 'POST') {
+    const body = await jsonBody(req);
+    const rows = Array.isArray(body.services) ? body.services : [];
+    if (!rows.length) return send(400, { error: '没有可导入的书签' });
+    if (rows.length > 500) return send(400, { error: '一次最多导入 500 个' });
+    const normUrl = (u) => String(u || '').trim().toLowerCase().replace(/\/+$/, '');
+    const data = loadData();
+    const catIds = categoriesOf(data).map((c) => c.id);
+    const seenUrls = new Set(data.services.map((s) => normUrl(s.url)).filter(Boolean));
+    let maxOrder = data.services.reduce((m, s) => Math.max(m, s.sortOrder ?? 0), 0);
+    let imported = 0, dupes = 0;
+    for (const r of rows) {
+      const f = pickFields(r || {}, null, catIds);
+      if (!f.name) continue;
+      const nu = normUrl(f.url);
+      if (nu && seenUrls.has(nu)) { dupes++; continue; }
+      const svc = Object.assign({
+        id: crypto.randomBytes(12).toString('hex'),
+        category: 'relay',
+        url: '', account: '', secret: '', price: '', notes: '',
+        registeredAt: todayStr(), expiresAt: '',
+        checkinFrequency: 'none', checkinEveryDays: 1, renewDays: 365, checkins: [],
+        visits: 0,
+        sortOrder: ++maxOrder
+      }, f);
+      data.services.push(svc);
+      if (nu) seenUrls.add(nu);
+      imported++;
+    }
+    if (imported) {
+      syncAchievements(data);
+      writeJSON(DATA_FILE, data);
+    }
+    return send(200, { ok: true, imported, skipped: rows.length - imported - dupes, dupes });
+  }
+
+  /* v62：账号 CSV 导入——按服务名匹配已有服务（找不到的跳过并上报），同服务同账号已存在就跳过；
+     只追加账号，不改服务其他字段；新账号默认不是默认账号，除非该服务原来一个账号都没有 */
+  if (pathname === '/api/services/import-accounts' && req.method === 'POST') {
+    const body = await jsonBody(req);
+    const rows = Array.isArray(body.accounts) ? body.accounts : [];
+    if (!rows.length) return send(400, { error: '没有可导入的账号' });
+    if (rows.length > 500) return send(400, { error: '一次最多导入 500 个' });
+    const data = loadData();
+    const byName = new Map();
+    for (const s of data.services) {
+      const key = String(s.name || '').trim().toLowerCase();
+      if (key && !byName.has(key)) byName.set(key, s);
+    }
+    let imported = 0, dupes = 0, missingRows = 0;
+    const missing = [];
+    const missingSeen = new Set();
+    for (const r of rows) {
+      if (!r || typeof r !== 'object') continue;
+      const svcName = String(r.service || '').trim();
+      const svc = svcName ? byName.get(svcName.toLowerCase()) : null;
+      if (!svc) {
+        missingRows++;
+        if (svcName && !missingSeen.has(svcName)) { missingSeen.add(svcName); missing.push(svcName); }
+        continue;
+      }
+      const acc = sanitizeAccount({
+        label: r.label, username: r.username, password: r.password, notes: r.notes
+      });
+      if (!acc || !acc.username) continue;
+      normalizeAccounts(svc);
+      if (svc.accounts.some((a) => String(a.username || '').trim().toLowerCase() === acc.username.toLowerCase())) { dupes++; continue; }
+      acc.isDefault = svc.accounts.length === 0;
+      svc.accounts.push(acc);
+      normalizeAccounts(svc);
+      imported++;
+    }
+    if (imported) writeJSON(DATA_FILE, data);
+    return send(200, { ok: true, imported, skipped: rows.length - imported - dupes - missingRows, dupes, missing });
+  }
   if (pathname === '/api/reorder' && req.method === 'POST') {
     const body = await jsonBody(req);
     if (!Array.isArray(body.ids)) return send(400, { error: '参数错误' });
