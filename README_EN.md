@@ -1,8 +1,8 @@
-# 🗂️ My Service Hub
+# 🗂️ HubMate — My Service Hub
 
 [中文](./README.md) | English
 
-[![GitHub stars](https://img.shields.io/github/stars/jasonssuns-prog/mysiteown)](https://github.com/jasonssuns-prog/mysiteown/stargazers)
+[![GitHub stars](https://img.shields.io/github/stars/jasonssuns-prog/hubmate)](https://github.com/jasonssuns-prog/hubmate/stargazers)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D18-brightgreen)](https://nodejs.org/)
 
@@ -101,7 +101,7 @@ This is a free, open-source project maintained by one person. If you find it use
 
 - Give it a ⭐ **Star** so more people can find it;
 - Sponsor continued development via [GitHub Sponsors](https://github.com/sponsors/jasonssuns-prog);
-- Found a bug or want a feature? Open an [Issue](https://github.com/jasonssuns-prog/mysiteown/issues).
+- Found a bug or want a feature? Open an [Issue](https://github.com/jasonssuns-prog/hubmate/issues).
 
 ## 📄 License
 

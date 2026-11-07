@@ -1,8 +1,8 @@
-# 🗂️ 我的服务台
+# 🗂️ HubMate — 我的服务台
 
 [English](./README_EN.md) | 中文
 
-[![GitHub stars](https://img.shields.io/github/stars/jasonssuns-prog/mysiteown)](https://github.com/jasonssuns-prog/mysiteown/stargazers)
+[![GitHub stars](https://img.shields.io/github/stars/jasonssuns-prog/hubmate)](https://github.com/jasonssuns-prog/hubmate/stargazers)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D18-brightgreen)](https://nodejs.org/)
 
@@ -101,7 +101,7 @@ Token 只存在服务端的 `data.json`，不会出现在前端和备份文件�
 
 - 点个 ⭐ **Star**，让更多人看到它；
 - 通过 [GitHub Sponsors](https://github.com/sponsors/jasonssuns-prog) 赞助，支持持续开发；
-- 有问题或想要的功能，欢迎提 [Issue](https://github.com/jasonssuns-prog/mysiteown/issues)。
+- 有问题或想要的功能，欢迎提 [Issue](https://github.com/jasonssuns-prog/hubmate/issues)。
 
 ## 📄 License
 
