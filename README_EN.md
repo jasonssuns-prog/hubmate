@@ -14,6 +14,16 @@ Pure Node.js with **zero dependencies** (no `npm install`), data lives in a sing
 
 > ⭐ If this project is useful to you, please give it a Star. To support continued development, see [Sponsor](#️-sponsor) at the bottom.
 
+## 💡 Why HubMate
+
+- **Zero dependencies**: pure Node.js, no `npm install`, no third-party packages — nothing in the supply chain to break, one command to deploy
+- **Your data stays yours**: everything lives in a single `data.json` on your own server, never uploaded to any cloud; backups, restores, and exports are all under your control
+- **Free**: MIT open source, host it yourself for free — runs fine on free-tier servers (Oracle Always Free, instabox free tier)
+- **Lightweight**: single-file data, tiny resource footprint — a 1-core box is enough
+- **All in one place**: check-ins, expiry reminders, notepad, Telegram notifications, multi-account, multi-server sync, GitHub auto-backup, auto sign-in, health scores, 2FA, calendar subscription… one page manages it all, no pile of apps
+- **Self-hosted**: no third-party service required (except optional Telegram / GitHub); works on your LAN too
+- **Mobile friendly**: add to home screen and use it like an app, with a mobile-optimized layout
+
 ## ✨ Features
 
 ### Service management
