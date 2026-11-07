@@ -64,8 +64,22 @@ Pure Node.js with **zero dependencies** (no `npm install`), data lives in a sing
 ### API token (iOS Shortcuts)
 - Generate a dedicated token from the sidebar's "🔑 API token" panel and use it in an iOS Shortcut to sign in without opening the page; the token only authorizes the check-in endpoints (sign all, sign one service) and nothing else; it is shown once when generated, can be revoked anytime, and is never included in backup exports
 
+### Highlights (v60)
+- **Auto sign-in**: each service can have a sign-in request configured (URL + method + headers + body + text the response must contain); the server runs it hourly, and only a success counts as a sign-in — failures are not recorded and the Telegram reminder still fires. **Only works for plain API sign-ins with no human verification; sites with a CAPTCHA or a login form cannot be automated**; there is a "test this request" button in the edit dialog
+- **Service health score**: a 0–100 score per service (uptime + expiry distance + check-in + dead link), shown as a badge on each card, with the 5 lowest scores listed in the data center
+- **Two-factor login**: TOTP two-factor authentication (Google / Microsoft Authenticator, 1Password, etc.); after the password, a 6-digit code from your authenticator app is required; the secret lives only on the server and is never included in backups
+- **Multi-tag**: a service can carry multiple tags (e.g. both "VPS" and "free"); tap a tag on a card or in the tag row to filter to services with that tag; search matches tags too
+- **Public status page**: the pre-login landing page has a "Service status" section showing each service's online/offline state and 7-day uptime
+- **Accounts CSV export**: all recorded accounts exported as CSV, importable into 1Password or Bitwarden; the file contains passwords, keep it safe
+- **GitHub auto-backup**: with a token and a private repo configured, the data is pushed daily to `hubmate-backup.json` in the repo (the Git history is the backup history); skipped when the data is unchanged; the login password, Telegram token, API token, TOTP secret, and auto-sign-in headers are stripped before pushing
+
+### Multi-server sync (v61)
+- Deploy the hub on several servers and keep the data in sync: if one goes down, use another; when the downed server comes back up, it pulls the latest data within 30 seconds
+- Every server shares one sync token (use it only between your own servers — it can read and write the whole dataset, keep it secret) and the other servers' addresses; on boot and every 5 minutes each server compares recency and content hash with its peers and pulls or pushes the newer data
+- The current data is auto-backed up before adopting a peer's data (keeps the last 5); note: do not write to two servers in the same second — normally write on one server and treat the other as a hot standby
+
 ### Backup & security
-- **Backup / restore**: one-click backup download (login password hash, Telegram token, and API token are stripped automatically); restoring auto-saves the current data first (keeps the last 5)
+- **Backup / restore**: one-click backup download (login password hash, Telegram token, API token, TOTP secret, sync token, and auto-sign-in headers are stripped automatically); restoring auto-saves the current data first (keeps the last 5)
 - **Export ledger**: generates a `服务台账.md` (service ledger) for easy reading
 - **Login captcha**: built-in image captcha (one-time, 5-minute expiry, checked before the password) + per-IP rate limiting (10 attempts / 10 min)
 - **Security headers + CSP, gzip, ETag caching**, systemd sandbox running as a low-privilege user
@@ -110,7 +124,7 @@ The token is stored only in the server's `data.json` and never appears in the fr
 
 Everything lives in `data/data.json` (services, categories, notes, settings, check-in history). The service re-reads it on every start, so you can edit the file directly if you like.
 
-> Backup files **exclude** the login password hash and the Telegram token; restoring a backup keeps your current token.
+> Backup files **exclude** the login password hash, Telegram token, API token, TOTP secret, sync token, and auto-sign-in headers; restoring a backup keeps your current values.
 
 ## ❤️ Sponsor
 
