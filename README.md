@@ -220,6 +220,10 @@ Token 只存在服务端的 `data.json`，不会出现在前端和备份文件�
 - 通过 [GitHub Sponsors](https://github.com/sponsors/jasonssuns-prog) 赞助，支持持续开发；
 - 有问题或想要的功能，欢迎提 [Issue](https://github.com/jasonssuns-prog/hubmate/issues)。
 
+## 🔗 友链
+
+- [LINUX DO](https://linux.do) — 友好互联的社区
+
 ## 📄 License
 
 [MIT](./LICENSE)
