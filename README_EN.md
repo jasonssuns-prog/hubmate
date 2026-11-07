@@ -188,6 +188,10 @@ This is a free, open-source project maintained by one person. If you find it use
 - Sponsor continued development via [GitHub Sponsors](https://github.com/sponsors/jasonssuns-prog);
 - Found a bug or want a feature? Open an [Issue](https://github.com/jasonssuns-prog/hubmate/issues).
 
+## 🔗 Friendly links
+
+- [LINUX DO](https://linux.do) — a friendly community
+
 ## 📄 License
 
 [MIT](./LICENSE)
