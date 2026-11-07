@@ -160,10 +160,6 @@ a:hover { text-decoration: underline; }
   backdrop-filter: blur(18px);
   overflow-y: auto;
 }
-/* 桌面端：导航太长时内部滚动，底部按钮（退出等）始终可见 */
-@media (min-width: 781px) {
-  .sidebar .nav { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
-}
 .brand { display: flex; align-items: center; gap: 12px; padding: 2px 6px 0; }
 .logo {
   width: 42px; height: 42px; border-radius: 13px; flex-shrink: 0;
