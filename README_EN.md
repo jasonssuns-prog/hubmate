@@ -54,7 +54,7 @@ Pure Node.js with **zero dependencies** (no `npm install`), data lives in a sing
 
 ### Expiry & renewal
 - **Expiring soon**: services expiring within 30 days listed in the sidebar (with a count badge), most urgent first; a banner on top for anything due within 7 days
-- **Renew**: extends by the service's own renewal cycle (from the old expiry date if not expired, from today if expired; 365 days = +1 year, Feb 29 → Feb 28)
+- **Renew**: always counted from today (renewing early does not keep the remaining days — new expiry = today + renewal cycle; 365 days = +1 year, Feb 29 → Feb 28)
 - **Undo renewal**: renewed by mistake? Undo restores the previous expiry date
 - **Renewal history**: every renewal is logged (when, from which date to which date); expand it from the expiring row with "📜 Records", and cards show the last renewal date; undoing a renewal removes its log entry too
 - **Cycle auto-fill**: expiry = registration/purchase date + renewal cycle — change either one and the other fills in; renewing also moves the start date to the new cycle start so the loop keeps going (a manually edited expiry is never auto-overwritten)

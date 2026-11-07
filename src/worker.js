@@ -951,6 +951,12 @@ function addDays(dateStr, n) {
   const [y, m, d] = dateStr.split('-').map(Number);
   return new Date(Date.UTC(y, m - 1, d) + n * 86400e3).toISOString().slice(0, 10);
 }
+/* v66：续期一律从今天起算——提前续期不保留剩余天数（新到期日 = 今天 + 续期周期，
+   注册/购买日期也设为今天，新周期从今天开始）。已过期的服务本来就是从今天起算，
+   结果不变。365 天按加一年（2 月 29 日 → 2 月 28 日），其他天数直接加天数。 */
+function renewDates(t, days) {
+  return { registeredAt: t, expiresAt: days === 365 ? addYear(t) : addDays(t, days) };
+}
 
 /* ---------- Telegram 通知 ---------- */
 function notifyCfg(data) {
@@ -2329,16 +2335,17 @@ async function handleAPI(request, env, pathname) {
       return send(200, { ok: true, checkins: svc.checkins, accounts: svc.accounts });
     }
     if (method === 'POST' && m[2] === '/renew') {
-      const cur = svc.expiresAt && /^\d{4}-\d{2}-\d{2}$/.test(svc.expiresAt) ? svc.expiresAt : t;
-      const base = cur < t ? t : cur;
+      /* v66：续期一律从今天起算——提前续期不保留剩余天数（新到期日 = 今天 + 续期周期，
+         注册/购买日期也设为今天，新周期从今天开始）。已过期的服务本来就是从今天起算，
+         结果不变。快照和续期记录照常记，撤回续期照常恢复两个日期。 */
       const days = renewEvery(svc);
       svc.prevRenew = { expiresAt: svc.expiresAt || '', registeredAt: svc.registeredAt || '' };
       delete svc.prevExpiresAt;
       svc.renewHistory = (Array.isArray(svc.renewHistory) ? svc.renewHistory : []).filter((h) => h && /^\d{4}-\d{2}-\d{2}$/.test(h.at || ''));
-      const newExpires = days === 365 ? addYear(base) : addDays(base, days);
+      const newExpires = renewDates(t, days).expiresAt;
       svc.renewHistory.push({ at: t, from: svc.expiresAt || '', to: newExpires });
       if (svc.renewHistory.length > 20) svc.renewHistory = svc.renewHistory.slice(-20);
-      svc.registeredAt = base;
+      svc.registeredAt = t;
       svc.expiresAt = newExpires;
       await saveData(db, data);
       return send(200, { ok: true, expiresAt: svc.expiresAt });
