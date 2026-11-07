@@ -2475,13 +2475,13 @@ async function handleAPI(req, res, pathname) {
       return send(200, { ok: true, checkins: svc.checkins, accounts: svc.accounts });
     }
     if (req.method === 'POST' && m[2] === '/renew') {
-      /* 按服务自己的续期周期顺延：未过期的从原到期日起续，已过期的从今天起续，免得续完还是过期；
+      /* v66：续期一律从今天起算——新到期日 = 今天 + 续期周期，提前续期不保留剩余天数
+         （原来是未过期的从原到期日起续，提前 15 天续 20 天周期会变成 35 天后到期，不对）；
          365 天沿用加一年（2 月 29 日 → 2 月 28 日），其他天数直接加天数 */
-      const cur = svc.expiresAt && /^\d{4}-\d{2}-\d{2}$/.test(svc.expiresAt) ? svc.expiresAt : t;
-      const base = cur < t ? t : cur;
+      const base = t;
       const days = renewEvery(svc);
       /* v51：续期前先快照旧的两个日期，撤回续期时一起恢复；续期把开始时间（注册/购买日期）
-         也推到新周期起点（未过期的从原到期日起，已过期的从今天起），开始时间 + 续期周期 = 到期日，循环不断 */
+         也推到今天（新周期从今天开始），开始时间 + 续期周期 = 到期日，循环不断 */
       svc.prevRenew = { expiresAt: svc.expiresAt || '', registeredAt: svc.registeredAt || '' };
       delete svc.prevExpiresAt;
       /* v59：续期记录——每次续期记一笔（哪天续的、从哪天续到哪天），只留最近 20 条；
