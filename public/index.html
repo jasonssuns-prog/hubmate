@@ -11,7 +11,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="apple-touch-icon" href="/icon-180.png">
-<link rel="stylesheet" href="/style.css?v=20261111-w5">
+<link rel="stylesheet" href="/style.css?v=20261111-w6">
 </head>
 <body class="mode-preview" data-theme="neon">
 
@@ -639,6 +639,16 @@
       </label>
       <div id="cat-suggest" class="hidden span2" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="muted" id="cat-suggest-text"></span><button id="btn-cat-apply" class="btn small primary" type="button">应用推荐</button></div>
       <label class="span2">网址<input id="f-url" placeholder="https://…"></label>
+      <div class="span2 frow">网站图标
+        <span class="icon-row">
+          <img id="f-icon-preview" class="icon-preview" alt="" hidden>
+          <span id="f-icon-placeholder" class="icon-placeholder">🗂️</span>
+          <button type="button" id="btn-icon-upload" class="btn ghost small">📷 上传图片</button>
+          <button type="button" id="btn-icon-remove" class="btn ghost small" hidden>✕ 移除</button>
+          <input type="file" id="f-icon-file" accept="image/*" class="hidden">
+        </span>
+        <span class="muted" style="font-size:12px">选一张图，会裁成正方形、压缩到 96×96 后存进服务里；不传就继续用网站自动图标。</span>
+      </div>
       <label class="span2">标签（逗号分隔，比如 VPS，免费；一个服务可打多个标签）<input id="f-tags" placeholder="比如 VPS，免费"></label>
       <label>注册 / 购买日期<input id="f-registered" type="date"></label>
       <label>到期日<input id="f-expires" type="date"></label>
@@ -736,6 +746,6 @@
 </div>
 
 <div id="toast"></div>
-<script src="/app.js?v=20261111-w5"></script>
+<script src="/app.js?v=20261111-w6"></script>
 </body>
 </html>
