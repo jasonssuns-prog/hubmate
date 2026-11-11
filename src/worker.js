@@ -24,9 +24,9 @@ const SESSION_MS = 30 * 86400 * 1000;
    services / notes / sessions 各加 userId 列（ensureSchema 里按 PRAGMA 幂等补列）。 */
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS services (id TEXT PRIMARY KEY, data TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS notes (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', content TEXT NOT NULL DEFAULT '', createdAt TEXT NOT NULL DEFAULT '', updatedAt TEXT NOT NULL DEFAULT '');
-CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, created INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS services (id TEXT PRIMARY KEY, data TEXT NOT NULL, userId TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS notes (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', content TEXT NOT NULL DEFAULT '', createdAt TEXT NOT NULL DEFAULT '', updatedAt TEXT NOT NULL DEFAULT '', userId TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, created INTEGER NOT NULL, userId TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS captchas (id TEXT PRIMARY KEY, code TEXT NOT NULL, expiresAt INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS login_throttle (ip TEXT PRIMARY KEY, count INTEGER NOT NULL DEFAULT 0, resetAt INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS backups (id INTEGER PRIMARY KEY AUTOINCREMENT, createdAt TEXT NOT NULL, data TEXT NOT NULL);
@@ -38,11 +38,17 @@ function ensureSchema(db) {
   if (!schemaPromise) {
     schemaPromise = (async () => {
       await db.exec(SCHEMA_SQL);
-      /* v67：给旧库补 userId 列（PRAGMA 查了再加，重复跑也不报错） */
+      /* v67：给旧库补 userId 列。新库建表时已带 userId，旧库走 ALTER。
+         不用 PRAGMA table_info 查列是否存在：线上 D1 对 PRAGMA 内省有限制，
+         查列失败会让整个 ensureSchema 抛错，进而 /api/captcha 等全部 500，
+         而前端原来还把这个失败静默吞掉，登录框就只剩一个空白验证码框。
+         改成直接 ALTER、只忽略“列已存在”的报错，其它错误继续往上抛。 */
       for (const table of ['services', 'notes', 'sessions']) {
-        const info = await db.prepare(`PRAGMA table_info(${table})`).all();
-        const has = (info.results || []).some((c) => c.name === 'userId');
-        if (!has) await db.exec(`ALTER TABLE ${table} ADD COLUMN userId TEXT NOT NULL DEFAULT ''`);
+        try {
+          await db.exec(`ALTER TABLE ${table} ADD COLUMN userId TEXT NOT NULL DEFAULT ''`);
+        } catch (e) {
+          if (!/duplicate column/i.test(e && e.message ? e.message : '')) throw e;
+        }
       }
     })().catch((e) => { schemaPromise = null; throw e; });
   }
@@ -1802,14 +1808,22 @@ async function handleAPI(request, env, pathname) {
   const method = request.method;
   const send = (status, obj, headers) => jsonResponse(status, obj, headers);
 
+  /* 健康检查不依赖数据库：D1 未绑定时它也能告诉你 db:false，
+     免得所有接口一起 500、前端只剩空白却看不出原因。 */
+  if (pathname === '/api/healthz' && method === 'GET') {
+    return send(200, { ok: true, runtime: 'workers', db: !!db });
+  }
+
+  /* D1 没绑定时直接明说，不要等 ensureSchema 里报一个看不懂的 500：
+     常见于 Deploy 按钮部署后没绑 D1，或 wrangler.toml 里的 database_id 对不上。 */
+  if (!db) {
+    return send(503, { error: 'D1 数据库未绑定：请在 Cloudflare Worker 设置里绑定名为 DB 的 D1 数据库（hubmate）后重新部署' });
+  }
+
   /* v67：所有 API 入口先保证表结构存在（ensureSchema 内部有 promise 缓存，
      每个 isolate 只跑一次 DDL）。没有这一步，全新 D1 上第一个 /api/captcha
      或 /api/login 请求会因为 captchas/login_throttle/users 表不存在而 500。 */
   await ensureSchema(db);
-
-  if (pathname === '/api/healthz' && method === 'GET') {
-    return send(200, { ok: true, runtime: 'workers' });
-  }
 
   if (pathname === '/api/captcha' && method === 'GET') {
     return send(200, await makeCaptcha(db));

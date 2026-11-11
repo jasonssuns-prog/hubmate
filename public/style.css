@@ -966,6 +966,8 @@ body.mode-preview { background: radial-gradient(900px 500px at 78% -80px, rgba(2
 .captcha-row input { flex: 1; min-width: 0; }
 .captcha-img { display: inline-flex; height: 44px; border-radius: 8px; overflow: hidden; cursor: pointer; flex-shrink: 0; border: 1px solid var(--border); }
 .captcha-img svg { display: block; height: 44px; width: auto; }
+/* 验证码加载失败时的占位：不要留白，点它重试（见 app.js loadCaptcha） */
+.captcha-fallback { display: inline-flex; align-items: center; justify-content: center; width: 130px; height: 44px; font-size: 12px; color: var(--bad); background: var(--card); }
 
 /* ---------- v16 全站科技感打磨（只加样式与滚动体验，不改功能逻辑） ---------- */
 /* 1. 菜单锚点跳转改成平滑滑动，不再“瞬移”；减动效用户保持瞬移 */

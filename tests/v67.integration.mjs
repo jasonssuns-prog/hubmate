@@ -241,18 +241,18 @@ console.log('== 备份 v2：管理员能下，含所有用户，不含任何密�
   eq('alice 的仍是 Alice站', a.json[0].name, 'Alice站');
 }
 
-console.log('== 前端 v67 资产：?v=20261108-w3，含注册/用户管理/邀请码入口 ==');
+console.log('== 前端 v67 资产：?v=20261111-w4，含注册/用户管理/邀请码入口 ==');
 {
   const html = await req('GET', '/');
   ok('首页 200', html.status === 200);
-  ok('app.js?v=20261108-w3', html.text.includes('app.js?v=20261108-w3'));
-  ok('style.css?v=20261108-w3', html.text.includes('style.css?v=20261108-w3'));
+  ok('app.js?v=20261111-w4', html.text.includes('app.js?v=20261111-w4'));
+  ok('style.css?v=20261111-w4', html.text.includes('style.css?v=20261111-w4'));
   ok('注册入口', html.text.includes('id="link-register"'));
   ok('注册弹窗', html.text.includes('id="register-overlay"'));
   ok('我的账号面板', html.text.includes('id="sec-account"'));
   ok('用户管理面板', html.text.includes('id="sec-users"'));
   ok('邀请码面板', html.text.includes('id="sec-invites"'));
-  const js = await req('GET', '/app.js?v=20261108-w3');
+  const js = await req('GET', '/app.js?v=20261111-w4');
   ok('app.js 200', js.status === 200);
   ok('app.js 含 renderUsers', js.text.includes('renderUsers'));
   ok('app.js 含 renderInvites', js.text.includes('renderInvites'));

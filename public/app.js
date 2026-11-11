@@ -348,9 +348,17 @@ async function loadCaptcha() {
   try {
     const r = await api('/api/captcha');
     if (seq !== captchaSeq) return;
+    if (!r || !r.id || !r.svg) throw new Error('验证码返回为空');
     captchaId = r.id;
     $('#l-captcha-img').innerHTML = r.svg;
-  } catch { /* 验证码加载失败时登录会由服务端报错，不阻塞打开登录框 */ }
+  } catch (e) {
+    /* 原来这里是空 catch：/api/captcha 一旦 500（比如线上 D1 没绑好），
+       登录框就只剩一个空白验证码框，用户看不出原因、也登不进去。
+       现在把失败写在图的位置上，点它或点“换一张”都能重试，原因进控制台。 */
+    if (seq !== captchaSeq) return;
+    console.error('[captcha] 加载失败:', e && e.message ? e.message : e);
+    $('#l-captcha-img').innerHTML = '<span class="captcha-fallback">加载失败，点我重试</span>';
+  }
 }
 function openLogin() {
   $('#l-err').classList.add('hidden');
@@ -2540,9 +2548,15 @@ async function loadRegisterCaptcha() {
   try {
     const r = await api('/api/captcha');
     if (seq !== regCaptchaSeq) return;
+    if (!r || !r.id || !r.svg) throw new Error('验证码返回为空');
     regCaptchaId = r.id;
     $('#r-captcha-img').innerHTML = r.svg;
-  } catch { /* 验证码加载失败时注册会由服务端报错 */ }
+  } catch (e) {
+    /* 和登录验证码一样：失败要看得见、可重试，不要静默留白（见 loadCaptcha）。 */
+    if (seq !== regCaptchaSeq) return;
+    console.error('[captcha] 注册验证码加载失败:', e && e.message ? e.message : e);
+    $('#r-captcha-img').innerHTML = '<span class="captcha-fallback">加载失败，点我重试</span>';
+  }
 }
 function openRegister() {
   $('#login-overlay').classList.add('hidden');
