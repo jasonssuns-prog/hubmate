@@ -160,6 +160,7 @@ body:not(.is-admin) .admin-only { display: none !important; }
   background: color-mix(in srgb, var(--bg) 55%, transparent);
   border-right: 1px solid var(--border);
   backdrop-filter: blur(18px);
+  overflow-y: auto;
 }
 .brand { display: flex; align-items: center; gap: 12px; padding: 2px 6px 0; }
 .logo {

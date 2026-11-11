@@ -1631,7 +1631,7 @@ function strippedBackupDataV2(all) {
   };
 }
 /* 把一份备份里的单个用户业务数据映射回 data 对象（服务逐字段清洗，分类、
-   历史、经验、共享账号库、月度报告、归档记录、登录历史都恢复；通知渠道的
+   历史、经验、记事本、共享账号库、月度报告、归档记录、登录历史都恢复；通知渠道的
    密钥不覆盖（留着当前配好的），账号（users/invite_codes）不动）。
    v1 旧备份（顶层就是 services）和 v2 备份里的 userData[uid] 都走这里。 */
 function restoreUserData(data, imp) {
@@ -1682,6 +1682,8 @@ function restoreUserData(data, imp) {
   if (Array.isArray(imp.monthlyReports)) data.monthlyReports = imp.monthlyReports.filter((r) => r && typeof r.month === 'string').slice(-12);
   if (Array.isArray(imp.archivedLog)) data.archivedLog = imp.archivedLog.filter((r) => r && typeof r.id === 'string').slice(-50);
   if (Array.isArray(imp.loginHistory)) data.loginHistory = imp.loginHistory.filter((r) => r && typeof r.at === 'string').slice(-50);
+  /* 记事本：之前漏了，备份里有 notes 但恢复时没写回，导致恢复后记事全丢 */
+  if (Array.isArray(imp.notes)) data.notes = imp.notes.filter((n) => n && typeof n.id === 'string').map((n) => ({ id: String(n.id), title: String(n.title || '').slice(0, 100), content: String(n.content || '').slice(0, 20000), createdAt: String(n.createdAt || ''), updatedAt: String(n.updatedAt || '') }));
   if (imp.notify && typeof imp.notify === 'object') {
     const n = notifyCfg(data);
     const keep = { token: n.token, webhookUrl: n.webhookUrl, barkKey: n.barkKey, serverChanKey: n.serverChanKey };
