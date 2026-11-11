@@ -78,14 +78,24 @@ function autoFillExpires() {
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
-/* 网站真实图标：Google favicon 服务按域名取，加载失败自动隐藏、回落到分类 emoji */
+/* 网站图标：优先用用户上传的自定义图标（data URL），其次 Google favicon 服务按域名取。
+   注意：内联 onerror 会被全站 CSP（script-src 'self'，无 unsafe-inline）拦掉，
+   所以加载失败的兜底改用下面捕获阶段的委托监听；img-src 也放行了 google.com。 */
 function favIcon(s) {
+  if (s.icon && typeof s.icon === 'string' && s.icon.startsWith('data:image/')) {
+    return `<img class="site-fav" src="${s.icon}" alt="" loading="lazy">`;
+  }
   if (!s.url) return '';
   let host = '';
   try { host = new URL(s.url).hostname; } catch { return ''; }
   if (!host) return '';
-  return `<img class="site-fav" src="https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=64" alt="" loading="lazy" onerror="this.remove()">`;
+  return `<img class="site-fav" src="https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=64" alt="" loading="lazy">`;
 }
+/* 图标加载失败就去掉，不留裂图：error 事件不冒泡，用捕获阶段接住 */
+document.addEventListener('error', (e) => {
+  const t = e.target;
+  if (t && t.classList && t.classList.contains('site-fav')) t.remove();
+}, true);
 function daysUntil(dateStr) {
   if (!dateStr) return null;
   const [y, m, d] = dateStr.split('-').map(Number);
@@ -1286,6 +1296,9 @@ function openModal(svc) {
   renderCatOptions();
   $('#f-category').value = (svc?.category && CATS[svc.category]) ? svc.category : 'relay';
   $('#f-url').value = svc?.url || '';
+  /* v68：打开弹窗时把已有的自定义图标抄进草稿，预览跟着走 */
+  dialogIcon = (svc?.icon && typeof svc.icon === 'string' && svc.icon.startsWith('data:image/')) ? svc.icon : null;
+  renderIconPreview();
   $('#f-tags').value = (svc?.tags || []).join('，');
   $('#f-registered').value = svc?.registeredAt || todayStr();
   $('#f-expires').value = svc?.expiresAt || '';
@@ -1892,6 +1905,44 @@ $('#pass-overlay').addEventListener('click', (e) => { if (e.target === e.current
 $('#btn-pass').addEventListener('click', () => $('#pass-overlay').classList.remove('hidden'));
 $('#pass-cancel').addEventListener('click', () => $('#pass-overlay').classList.add('hidden'));
 
+/* v68：自定义图标上传——读图 → 正方形居中裁剪 → 96×96 → JPEG 0.85，存成 data URL（一般 3–8KB） */
+let dialogIcon = null; // 当前弹窗里的自定义图标（data URL 字符串），null = 没传
+function renderIconPreview() {
+  const prev = $('#f-icon-preview'), ph = $('#f-icon-placeholder'), rm = $('#btn-icon-remove');
+  if (!prev || !ph || !rm) return;
+  if (dialogIcon) { prev.src = dialogIcon; prev.hidden = false; ph.hidden = true; rm.hidden = false; }
+  else { prev.removeAttribute('src'); prev.hidden = true; ph.hidden = false; rm.hidden = true; }
+}
+function processIconFile(file) {
+  return new Promise((resolve, reject) => {
+    const rd = new FileReader();
+    rd.onerror = () => reject(new Error('read'));
+    rd.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('decode'));
+      img.onload = () => {
+        const side = Math.min(img.naturalWidth, img.naturalHeight);
+        const sx = (img.naturalWidth - side) / 2, sy = (img.naturalHeight - side) / 2;
+        const cv = document.createElement('canvas');
+        cv.width = 96; cv.height = 96;
+        cv.getContext('2d').drawImage(img, sx, sy, side, side, 0, 0, 96, 96);
+        resolve(cv.toDataURL('image/jpeg', 0.85));
+      };
+      img.src = rd.result;
+    };
+    rd.readAsDataURL(file);
+  });
+}
+$('#btn-icon-upload').addEventListener('click', () => $('#f-icon-file').click());
+$('#f-icon-file').addEventListener('change', async (e) => {
+  const f = e.target.files[0]; e.target.value = '';
+  if (!f) return;
+  if (!f.type.startsWith('image/')) { toast('请选择图片文件', 'bad'); return; }
+  try { dialogIcon = await processIconFile(f); renderIconPreview(); }
+  catch { toast('图片读不出来，换一张试试', 'bad'); }
+});
+$('#btn-icon-remove').addEventListener('click', () => { dialogIcon = null; renderIconPreview(); });
+
 $('#modal-save').addEventListener('click', async () => {
   const isEdit = !!editingId;
   const f = {
@@ -1906,6 +1957,7 @@ $('#modal-save').addEventListener('click', async () => {
     checkinEveryDays: Math.min(365, Math.max(1, parseInt($('#f-every-days').value, 10) || 1)),
     renewDays: Math.min(3650, Math.max(1, parseInt($('#f-renew-days').value, 10) || 365)),
     notes: $('#f-notes').value.trim(),
+    icon: dialogIcon,
     favorite: $('#f-fav').checked,
     abnormal: $('#f-abnormal').checked,
     customFields: collectCustomFields(),

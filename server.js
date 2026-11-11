@@ -70,7 +70,7 @@ const SEC_HEADERS = {
   'Cross-Origin-Opener-Policy': 'same-origin'
 };
 const CSP = "default-src 'self'; script-src 'self'; style-src 'self'; " +
-  "img-src 'self' data:; connect-src 'self'; font-src 'self'; " +
+  "img-src 'self' data: https://www.google.com; connect-src 'self'; font-src 'self'; " +
   "object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
 
 /* ---------- 小工具 ---------- */
@@ -373,6 +373,7 @@ function publicServices(data) {
     name: s.name,
     category: s.category,
     url: s.url,
+    icon: s.icon || '',
     registeredAt: s.registeredAt,
     expiresAt: s.expiresAt,
     price: s.price,
@@ -692,6 +693,11 @@ function pickFields(b, existing, catIds, vault) {
   if (b.renewDays !== undefined) out.renewDays = clampInt(b.renewDays, 1, 3650, 365);
   if (b.favorite !== undefined) out.favorite = !!b.favorite;
   if (b.abnormal !== undefined) out.abnormal = !!b.abnormal;
+  /* v68：自定义图标——data URL（前端已裁成 96×96 JPEG），只认 data:image/ 开头，最多 20000 字；传 null/'' 表示清掉 */
+  if (b.icon !== undefined) {
+    if (b.icon === null || b.icon === '') out.icon = '';
+    else if (typeof b.icon === 'string' && b.icon.startsWith('data:image/')) out.icon = b.icon.slice(0, 20000);
+  }
   /* v62：自定义字段——编辑页里加行/删行；只接受干净的键值对数组 */
   if (b.customFields !== undefined) out.customFields = sanitizeCustomFields(b.customFields);
   /* v60：多标签——逗号分隔也行，数组也行；最多 10 个，每个最多 20 字，去重去空 */
@@ -1744,6 +1750,7 @@ function restoreUserData(data, userId, imp) {
     name: String(s.name).slice(0, 100),
     category: catIds.has(s.category) ? s.category : 'relay',
     url: String(s.url || '').slice(0, 500),
+    icon: (typeof s.icon === 'string' && s.icon.startsWith('data:image/')) ? s.icon.slice(0, 20000) : undefined,
     account: String(s.account || '').slice(0, 500),
     secret: String(s.secret || '').slice(0, 500),
     price: String(s.price || '').slice(0, 500),
