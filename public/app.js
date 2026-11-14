@@ -581,17 +581,28 @@ function renderCheckin() {
     const p = serviceProgress(s, t);
     const st = streak(s.checkins);
     const last = (s.checkins || []).length ? s.checkins[s.checkins.length - 1] : '从未签到';
+    /* v69：多账号的服务，服务级按钮改成“全部签到”（一次签完剩下所有账号），
+       下面直接列出每个账号，各带各的签到/撤回——不用再去账号弹窗里找账号 */
+    const multi = live() && p.total > 1;
     const right = live()
       ? (ok
         ? `<span class="signed-tag">✓ 今日已签</span><button class="btn ghost" data-act="uncheckin" data-id="${s.id}">↩ 撤回</button>`
-        : `<button class="btn primary" data-act="checkin" data-id="${s.id}">签到 +5⚡</button>`)
+        : `<button class="btn primary" data-act="checkin" data-id="${s.id}">${multi ? '全部签到 +5⚡' : '签到 +5⚡'}</button>`)
       : `<button class="btn ghost" data-act="wantlogin">🔒 登录后签到</button>`;
-    return `<div class="checkin-row${s.abnormal ? ' abnormal' : ''}">
+    const accs = multi ? accountList(s).map((a) => {
+      const signed = accCheckins(a).includes(t);
+      const btn = signed
+        ? `<span class="signed-tag">✓ 已签</span><button class="btn small ghost" data-act="uncheckin-acc" data-id="${s.id}" data-acc="${esc(a.id)}">↩ 撤回</button>`
+        : `<button class="btn small primary" data-act="checkin-acc" data-id="${s.id}" data-acc="${esc(a.id)}">签到</button>`;
+      return `<div class="ci-acc"><span class="ci-acc-name">👤 ${esc(a.label)}${a.username && a.username !== a.label ? ` <span class="muted">${esc(a.username)}</span>` : ''}${a.isDefault ? ' ★' : ''}</span>${btn}</div>`;
+    }).join('') : '';
+    return `<div class="checkin-row${s.abnormal ? ' abnormal' : ''}${multi ? ' has-accs' : ''}">
       <div class="ci-info">
         <div class="ci-name">${esc(s.name)} ${s.abnormal ? '<span class="chip abn">⚠️ 异常</span>' : ''}${st ? `<span class="chip fire">🔥 连续${st}天</span>` : ''}${p.total > 1 ? `<span class="chip">${ok ? '✓ 全部账号已签' : `已签 ${p.done}/${p.total} · ${Math.round(p.done / p.total * 100)}%`}</span>` : ''}</div>
         <div class="ci-sub">${s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.url)}</a>` : '未填网址'} · 上次：${esc(last)}</div>
       </div>
       ${right}
+      ${accs ? `<div class="ci-accs">${accs}</div>` : ''}
     </div>`;
   }).join('');
 }
