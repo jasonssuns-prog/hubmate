@@ -452,6 +452,12 @@ a:hover { text-decoration: underline; }
 .ci-info { flex: 1; min-width: 0; }
 .ci-name { font-weight: 700; font-size: 14px; }
 .ci-sub { color: var(--muted); font-size: 12px; margin-top: 3px; }
+/* v69：签到面板多账号直签——有账号列表的行允许换行，账号子列表占满整行，缩进显示在服务下面 */
+.checkin-row.has-accs { flex-wrap: wrap; }
+.ci-accs { flex-basis: 100%; display: flex; flex-direction: column; gap: 6px; margin-top: 8px; padding-left: 12px; border-left: 2px solid color-mix(in srgb, var(--accent) 25%, transparent); }
+.ci-acc { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.ci-acc-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.ci-acc .btn { flex-shrink: 0; }
 
 .chip {
   position: relative; overflow: hidden;
